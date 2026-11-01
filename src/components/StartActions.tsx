@@ -19,6 +19,8 @@ const ACCEPT = [
   ".opus",
   ".flac",
   ".webm",
+  ".mpeg",
+  ".mpga",
   ".mp4",
 ].join(",");
 
@@ -115,7 +117,7 @@ export function StartActions({
         Audio streams directly to the private server proxy — the API key never reaches the browser.
       </p>
       <p className="mt-1 text-[11px] text-slate-400">
-        Uploads: WAV, MP3, M4A, AAC, OGG, FLAC or WebM · up to 30 minutes per file.
+        Uploads: WAV, MP3, M4A, AAC, OGG, FLAC or WebM · up to 10 MB. Transcripts include language detection and automatic speaker labels.
       </p>
     </section>
   );

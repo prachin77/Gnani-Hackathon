@@ -69,6 +69,7 @@ export function LiveTranscription({
   const [confirmingClear, setConfirmingClear] = useState(false);
 
   const hasSegments = segments.length > 0;
+  const hasDiarization = segments.some((s) => s.speakerId !== undefined && s.speakerId !== null);
   const isRecording = state === "recording";
   const isBatch = mode === "batch";
 
@@ -247,14 +248,28 @@ export function LiveTranscription({
                     >
                       {segment.language?.name ?? "Detected"}
                     </span>
+                    {segment.speakerId !== undefined && segment.speakerId !== null && (
+                      <span
+                        className="inline-flex items-center rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-emerald-700 ring-1 ring-inset ring-emerald-100"
+                      >
+                        Speaker {segment.speakerId}
+                      </span>
+                    )}
                     {segment.segmentIndex !== undefined && (
                       <span className="text-[10px] font-medium tabular-nums text-slate-400">
                         #{segment.segmentIndex}
                       </span>
                     )}
-                    <span className="ml-auto text-[10px] tabular-nums text-slate-400">
-                      {formatTimestamp(segment.receivedAt)}
-                    </span>
+                    {segment.startTime !== undefined && segment.endTime !== undefined ? (
+                      <span className="ml-auto text-[10px] tabular-nums text-slate-400">
+                        {formatTimestamp(segment.startTime * 1000)} –{" "}
+                        {formatTimestamp(segment.endTime * 1000)}
+                      </span>
+                    ) : (
+                      <span className="ml-auto text-[10px] tabular-nums text-slate-400">
+                        {formatTimestamp(segment.receivedAt)}
+                      </span>
+                    )}
                   </div>
                   <p className="whitespace-pre-wrap break-words text-[15px] leading-7 text-slate-800">
                     {segment.text}
@@ -286,7 +301,11 @@ export function LiveTranscription({
 
       <div className="flex items-center justify-between border-t border-slate-100 px-4 py-2 text-[10px] text-slate-400 sm:px-5">
         <span>
-          {isBatch ? "Every segment from the uploaded file." : "Language is detected per utterance."}
+          {hasDiarization
+            ? "Speaker-separated transcript (batch diarization)."
+            : isBatch
+            ? "Every segment from the uploaded file."
+            : "Language is detected per utterance."}
         </span>
         <span>Kept until you clear it.</span>
       </div>

@@ -34,6 +34,12 @@ export interface TranscriptSegment {
   language: LanguageInfo | null;
   segmentIndex?: number;
   receivedAt: number;
+  /** Speaker label from batch diarization, if available. */
+  speakerId?: number | null;
+  /** Segment start time in seconds (diarization only). */
+  startTime?: number;
+  /** Segment end time in seconds (diarization only). */
+  endTime?: number;
 }
 
 interface ServerFrame {

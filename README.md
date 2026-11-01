@@ -1,50 +1,40 @@
-# Voice-to-Text
+# Voice-to-Text — Gnani Prisma v3.0
 
-Real-time, multilingual speech-to-text in the browser, powered by **Gnani Prisma v3.0**.
+Real-time and batch, multilingual **speech-to-text with automatic speaker diarization**, in the browser, powered by **Gnani Prisma v3.0**.
 
-Speak into your microphone and watch completed utterances appear as they are transcribed — with automatic language detection for Hindi, English, Gujarati, Tamil, Telugu, Kannada, Malayalam, Marathi, Bengali and Punjabi.
+Two independent pipelines, one app:
 
----
+| | Realtime | Batch (uploaded file) |
+| --- | --- | --- |
+| Input | Microphone | Audio file (≤ 10 MB) |
+| Endpoint | `WS /ws/stt/realtime` → Gnani realtime WebSocket | `POST /api/stt/batch/diarize` → Gnani Batch Jobs REST API |
+| Output | Live transcript, language per utterance | Full transcript + **`speaker_id` per segment** (diarized) + timestamps |
+| Latency | Sub-second per utterance | Minutes (async job, polled every 10 s) |
+| Languages | Auto-detected (`indic-auto`) | Auto-detected (`indic-auto`) |
 
-## What's included
-
-- **Working microphone → Gnani → live transcript pipeline** (no simulated text)
-- **Secure WebSocket proxy** — the API key stays on the server
-- AudioWorklet capture: mono, resampled to **16 kHz**, **signed 16-bit LE PCM**, **1,024-byte frames** sent every **32 ms**
-- Graceful stop: trailing silence → `commit` → wait for the final transcript → close
-- Automatic language detection (`language_code=indic-auto`), language badge per segment
-- Live waveform, recording timer, speech/processing indicators, connection status
-- **Batch upload**: decode a file locally, stream it through the same Gnani session with flow control, show progress/status, and keep every transcript segment
-- Transcript copy (with fallback for older browsers) and confirm-to-clear
-- Responsive, minimal SaaS-style UI (React + TypeScript + Tailwind + Lucide)
+No translation, no simulated text, no user accounts — and the **Gnani API key never leaves the server**.
 
 ---
 
 ## Quick start
 
-**Requirements:** Node.js **20.19+** (or 22.12+), a microphone, and a Gnani API key.
+**Requirements:** Node.js **20.19+** (or 22.12+), a microphone (for realtime), and a Gnani API key.
 
-1. Put your key in `.env` at the project root:
+1. Put your key in `.env` at the project root (a file already exists — keep it out of version control):
 
    ```env
    GNANI_API_KEY=your-gnani-api-key
+   PORT=8787
    ```
 
-   (An `.env` file is already present in this project. Keep it out of version control.)
-
-2. Install dependencies:
+2. Install and run:
 
    ```bash
    npm install
-   ```
-
-3. Start the development servers:
-
-   ```bash
    npm run dev
    ```
 
-4. Open **http://localhost:5173**
+3. Open **http://localhost:5173**
 
    The Vite dev server proxies `/api` and `/ws` to the backend on port `8787`.
 
@@ -55,73 +45,104 @@ npm run build
 npm start
 ```
 
-Open **http://localhost:8787**. Express serves the built frontend and hosts the WebSocket proxy on the same origin.
+Open **http://localhost:8787** — Express serves the built frontend and hosts both the WebSocket proxy and the REST proxy on the same origin.
 
 > Do **not** open the HTML file directly (`file://`). `getUserMedia` requires a secure context: `localhost` or HTTPS.
 
 ---
 
-## How it works
+## Feature tour
+
+### 1. Realtime microphone transcription
+
+- Click **Record Audio** → your mic streams to Gnani through the secure proxy.
+- Each finished utterance appears with a **language badge** (Prisma detects the language per utterance — Indian English, Hindi, Tamil, Telugu, Bengali, Marathi, Gujarati, Kannada, Malayalam, Punjabi, including code-switching).
+- Live waveform, recording timer, speech/processing indicators, connection status.
+- **Stop** finalizes gracefully: trailing silence → `commit` → wait for the last transcript → close, so the final sentence is never lost.
+
+### 2. Batch upload with speaker diarization
+
+1. Click **Upload Audio** and choose a file → the app validates it and shows a **ready state**. Nothing is sent yet in this confirmed two-step flow.
+2. Click **Generate Transcript** → the file uploads to *your* server, which creates a Gnani **Batch STT job** with `with_diarization: true`.
+3. The panel tracks every stage — *Ready → Uploading → Starting job → Diarizing → Fetching transcripts → Complete* — with a progress bar. Status is polled every 10 s automatically.
+4. When done, segments appear with green **Speaker N** badges and `start – end` timestamps. Cancel stops local polling **and** asks Gnani to cancel the running job (best effort).
+
+**You upload once, click once.** Diarization is configured entirely on the backend — the frontend has no language, model or speaker options.
+
+### 3. Transcript panel
+
+- Copy the whole transcript (with clipboard fallback for older browsers), confirm-to-clear.
+- Empty/error states explain what happened ("No speech detected", "No transcript produced").
+- Realtime and batch use **separate state**, so neither can clear or interrupt the other.
+
+---
+
+## Architecture
 
 ```
-Browser                      Your Node server                 Gnani
-───────                      ────────────────                 ─────
+REALTIME (streaming, unchanged flow)
+Browser                          Node server                        Gnani
+───────                          ───────────                        ─────
 getUserMedia
   → AudioContext
-  → AudioWorklet  ──PCM──►  /ws/stt/realtime  ──attaches x-api-key-id──►  wss://api.vachana.ai
-    (mono, 16 kHz,                                          ◄──  connected / speech_start
-     512 samples,                                                 processing / transcript
-     1,024 bytes, 32 ms)   ◄──JSON events / commit──              (Prisma v3.0)
+  → AudioWorklet ──PCM 1 KB──►  /ws/stt/realtime  ──+ x-api-key-id ──►  wss://api.vachana.ai/stt/v3/stream
+    mono 16 kHz                                                  ◄── connected / speech_start /
+    s16le, 32 ms                                                     processing / transcript (JSON)
+
+BATCH + DIARIZATION (REST jobs)
+Browser                          Node server                        Gnani
+───────                          ───────────                        ─────
+POST /api/stt/batch/diarize ──►  multipart forward ────────────►   POST /stt/v3/batch/jobs
+   (original file bytes)             config: model prisma-v3.0     → 201 { job_id, CREATED }
+                                     format transcribe
+                                     with_diarization true
+POST /:id/start ─────────────►  ─────────────────────────────►   POST /stt/v3/batch/jobs/:id/start
+GET  /:id (every 10 s) ──────►  ───── polling ────────────────►  GET /stt/v3/batch/jobs/:id
+GET  /:id/files ─────────────►  ─────────────────────────────►  GET .../files?status=COMPLETED
+GET  /download?url=... ──────►  fetch transcript_url ─────────►  (presigned URL)
+                                  ◄── segments[] with speaker_id ─
 ```
 
-### Audio pipeline details
+### What the server does for batch (all transparent to the user)
 
-| Stage | Implementation |
+| Concern | Handling |
 | --- | --- |
-| Capture | `navigator.mediaDevices.getUserMedia` with mono / echo cancellation / noise suppression |
-| Processing | `AudioWorklet` (`public/pcm-processor.js`); falls back to `ScriptProcessorNode` if needed |
-| Downmix | Stereo sources are averaged to mono |
-| Resample | Stateful linear resampler from the device rate (often 48 kHz) to 16 kHz |
-| Encoding | Signed 16-bit little-endian PCM |
-| Framing | Exactly 512 samples = **1,024 bytes** |
-| Pacing | Frames are emitted on the audio clock by the worklet — roughly one every 32 ms |
+| Wrong file extensions | The real container is **sniffed from magic bytes** (`OggS`, `RIFF/WAVE`, `ID3`, `ftyp`, `fLaC`, `AMR`, EBML…) and the filename is normalized before upload — WhatsApp voice notes that masquerade as `.mpeg` are fixed automatically. |
+| Gnani rate limits | Every Gnani REST call is wrapped in a retry: on **429** it retries up to **4 times** with backoff (honours `Retry-After`, otherwise 2 s → 4 s → 6 s → 8 s). Logged as `Gnani rate limited; retrying`. |
+| Slow processing | Diarization is an async job; the frontend polls `/status` every **10 s** (Gnani's recommended minimum) for up to **30 minutes**. |
+| Cancel | `Cancel` stops polling and calls Gnani's `/cancel` endpoint so the job stops server-side too. |
+| Route safety | The literal `/download` route is registered **before** `/:jobId` routes so Express never parses `"download"` as a UUID. |
+| Secrets | `x-api-key-id` is attached **only** on the server; the browser talks to your server, never to Gnani. |
 
-### Stop sequence
-
-1. Microphone capture stops and audio resources are released.
-2. ~512 ms of trailing silence is sent (paced at 32 ms per frame).
-3. `{"type":"commit"}` is sent to finalize the open utterance.
-4. The client waits for the final `transcript` (with a bounded timeout) before closing.
-5. The browser socket closes; the proxy closes the Gnani socket.
-
-This avoids losing the last sentence and prevents closing before the committed transcript arrives.
-
-### Batch processing (uploaded files)
-
-1. The selected file is read **in the browser** and decoded with the Web Audio API. The file itself is never posted to the server.
-2. Channels are downmixed and resampled to the same realtime format: **mono, 16 kHz, signed 16-bit LE PCM, 512-sample (1,024-byte) frames**.
-3. Frames stream through the dedicated `/ws/stt/batch` proxy. The server acknowledges frames and forwards only while the upstream socket has room, so uploaded audio is **never dropped** under backpressure.
-4. Audio is sent **4× faster than real time**, in 12-minute chunks. Each chunk uses a fresh Gnani session (safely below the 15-minute realtime cap) and is finalized with trailing silence + `commit`.
-5. The panel shows the current stage, percent complete, processed audio time, elapsed time, and the number of finished segments. Cancel stops immediately and keeps any completed segments.
-6. Realtime recording and batch upload use separate state, so neither can interrupt or clear the other.
-
-Batch limits: **100 MB** per file, **30 minutes** of audio, and any format the browser can decode (WAV, MP3, M4A, AAC, OGG, FLAC or WebM).
-
-### Connection headers sent by the server
+### Realtime session tuning (server-side headers)
 
 ```
-x-api-key-id:      GNANI_API_KEY   (from .env, never sent to the browser)
-model:             prisma-v3.0
-language_code:     indic-auto
-x-sample-rate:     16000
-format:            transcribe
-x-min-silence-ms:  500
-x-vad-threshold:   0.6
-x-idle-timeout-sec: 300
-x-max-speech-s:    30
+x-api-key-id:       GNANI_API_KEY   (from .env, never sent to the browser)
+model:              prisma-v3.0
+language_code:      indic-auto
+x-sample-rate:      16000
+format:             transcribe
+x-min-silence-ms:   500
+x-vad-threshold:    0.6
+x-idle-timeout-sec: 300   ← keeps quiet sessions alive past Gnani's 60 s default
+x-max-speech-s:     30    ← forces a transcript mid-monologue so results keep flowing
 ```
 
-In addition to the required headers, the idle timeout keeps quiet sessions alive past Gnani's 60-second default, and the 30-second speech cap keeps transcripts flowing during long monologues.
+---
+
+## Batch input requirements & limits
+
+| Item | Value |
+| --- | --- |
+| Max file size | **10 MB** (Gnani's direct-upload limit) |
+| Accepted extensions (browser picker) | `audio/*`, `.wav`, `.mp3`, `.m4a`, `.aac`, `.ogg`, `.oga`, `.opus`, `.flac`, `.webm`, `.mpeg`, `.mpga`, `.mp4` |
+| Accepted by Gnani | `.aac .amr .flac .m4a .mp3 .mp4 .ogg .opus .wav .webm` — mismatched extensions are auto-corrected via magic-byte sniffing |
+| Max speakers | Up to `num_speakers: 5` (Prisma v3.0 produces labels regardless; the flag only decides whether a diarization failure fails the file) |
+| Max audio duration | 4 h per file (Gnani), but 10 MB usually binds first — use MP3/OGG for long recordings |
+| Poll interval | 10 s; job polling gives up after ~30 minutes |
+| `transcript_url` expiry | 1 h — refunded automatically by re-fetching files |
+
+**Why 10 MB?** Gnani's Batch API caps direct multipart uploads at 10 MB; larger files need their presigned-upload flow (`POST /stt/v3/batch/v2/jobs`), not yet implemented here.
 
 ---
 
@@ -130,39 +151,96 @@ In addition to the required headers, the idle timeout keeps quiet sessions alive
 ```
 .
 ├── server/
-│   ├── server.ts           # Express + HTTP server, static frontend, /api/health
-│   ├── gnaniWebSocket.ts   # Secure WebSocket proxy, frame validation, relay
-│   ├── config.ts           # Env loading and constants
-│   └── logger.ts
+│   ├── server.ts              # Express app: static hosting, /api/health, batch diarization routes
+│   ├── gnaniWebSocket.ts      # Realtime WS proxy (+ legacy /ws/stt/batch streaming path)
+│   ├── gnaniBatch.ts          # Gnani Batch Jobs REST client: create/start/poll/files/download/cancel,
+│   │                          #   magic-byte extension sniffing, 429 retry wrapper
+│   ├── config.ts              # .env loading, Gnani session constants
+│   └── logger.ts              # Structured JSON-ish console logger
 ├── src/
+│   ├── App.tsx                # One app state: realtime or batch (disjoint), wiring
 │   ├── components/
-│   │   ├── Header.tsx
-│   │   ├── StartActions.tsx
-│   │   ├── RecordingPanel.tsx
-│   │   ├── BatchPanel.tsx           # Batch progress, status, cancel/retry
-│   │   ├── AudioVisualizer.tsx
-│   │   ├── LiveTranscription.tsx
-│   │   ├── StatusBadge.tsx
-│   │   └── ErrorBanner.tsx
+│   │   ├── BatchPanel.tsx     # Two-step upload→Generate, stage pills, progress, cancel/retry
+│   │   ├── LiveTranscription.tsx  # Shared transcript panel; Speaker N badges + segment times
+│   │   ├── StartActions.tsx   # Record / Upload entry cards
+│   │   ├── RecordingPanel.tsx, AudioVisualizer.tsx, Header.tsx,
+│   │   ├── StatusBadge.tsx, ErrorBanner.tsx
 │   ├── hooks/
-│   │   ├── useAudioStreaming.ts     # Realtime state machine, audio graph, socket, finalize
-│   │   └── useBatchProcessing.ts    # Batch decode → stream → progress → results
+│   │   ├── useAudioStreaming.ts    # Realtime: capture → WS → segments (state machine)
+│   │   ├── useBatchDiarization.ts  # Batch: select → generate → upload → poll → download
+│   │   └── useBatchProcessing.ts   # Legacy local-decode WS batch (unused by UI, kept for tests)
 │   ├── lib/
-│   │   ├── pcm.ts                   # Resampler, frame emitter, WS URL
-│   │   ├── batch.ts                 # File validation, decode, downmix, resample
-│   │   ├── languages.ts
-│   │   ├── format.ts
-│   │   └── errors.ts                # User-friendly error mapping
-│   ├── App.tsx
+│   │   ├── pcm.ts                 # Resampler, frame emitter, WS URL builder
+│   │   ├── batch.ts               # File validation, decode, downmix, resample (legacy path)
+│   │   └── languages.ts, format.ts, errors.ts
+│   ├── public/
+│   │   ├── pcm-processor.js       # AudioWorklet: mono 16 kHz s16le, 512-sample frames
+│   │   └── favicon.svg
+│   ├── scripts/
+│   │   ├── build.mjs              # Cross-platform typecheck + build
+│   │   └── test-batch-audio.ts, test-batch-proxy.ts   # Offline tests (no Gnani calls)
 │   ├── main.tsx
 │   └── index.css
-├── public/
-│   ├── pcm-processor.js    # AudioWorklet (16 kHz PCM framing)
-│   └── favicon.svg
-├── scripts/build.mjs        # Cross-platform typecheck + build
-├── .env                    # GNANI_API_KEY (git-ignored)
+├── .env                        # GNANI_API_KEY (git-ignored)
 └── .env.example
 ```
+
+---
+
+## API endpoints
+
+### Backend (this server)
+
+| Method & path | Purpose |
+| --- | --- |
+| `GET /api/health` | `{ status, model, language, sampleRate, configured }` |
+| `WS /ws/stt/realtime` | Realtime browser audio (binary 1,024-byte PCM frames) + JSON control frames |
+| `WS /ws/stt/batch` *(legacy)* | Uploaded-file streaming via the realtime Gnani socket, with `batch_ack` flow control |
+| `POST /api/stt/batch/diarize` | Multipart upload (`file`) → creates a diarization job → `{ job_id, status }` |
+| `POST /api/stt/batch/diarize/:jobId/start` | Starts the created job (`202 STARTING`) |
+| `GET /api/stt/batch/diarize/:jobId` | Job status: `CREATED/STARTING/QUEUED/IN_PROGRESS/COMPLETED/PARTIAL_FAILURE/FAILED/...` |
+| `GET /api/stt/batch/diarize/:jobId/files` | Completed files + `transcript_url`s |
+| `POST /api/stt/batch/diarize/:jobId/cancel` | Cancel the Gnani job |
+| `GET /api/stt/batch/diarize/download?url=…` | Proxies the presigned `transcript_url` and returns segment JSON |
+
+Realtime WS accepts only exact **1,024-byte binary** frames and `{"type":"commit"}` text frames; batch WS sessions also emit `{"type":"batch_ack","frames":N}` for the client's in-flight window. Everything else is dropped and logged.
+
+### Transcript document (downloaded JSON)
+
+```json
+{
+  "full_transcript": "hello how can i help you today i am calling about my order",
+  "model": "prisma-v3.0",
+  "language_code": "en-IN",
+  "segments": [
+    {
+      "segment_id": 0,
+      "start_time": 0.0,
+      "end_time": 0.71,
+      "text": "hello",
+      "speaker_id": 1,
+      "language_detected": null
+    }
+  ]
+}
+```
+
+The UI renders one card per segment: language badge (when known), **Speaker N** badge, `start – end` time range, text.
+
+---
+
+## Offline tests
+
+```bash
+npm run test:batch
+```
+
+Runs the legacy-path suites **without calling Gnani**:
+
+- **Batch audio preparation** — stereo→mono downmix + padding to whole 512-sample frames, 48 kHz→16 kHz resampling, rejected formats/sizes/durations, cancellation mid-decode.
+- **Batch proxy relay** — spins a fake upstream WS to prove every frame is relayed **in order** with a trailing `commit`, and that the realtime path is unaffected.
+
+Useful for verifying the shared plumbing (resampler, framing, pacing, flow control) without network or quota concerns.
 
 ---
 
@@ -170,77 +248,75 @@ In addition to the required headers, the idle timeout keeps quiet sessions alive
 
 | Command | Description |
 | --- | --- |
-| `npm run dev` | API (`tsx watch`, port 8787) + Vite frontend (port 5173) |
+| `npm run dev` | API (`tsx watch`, port 8787) + Vite frontend (port 5173), concurrently |
 | `npm run build` | Typecheck frontend & server, then build to `dist/` |
-| `npm start` | Serve `dist/` and the proxy on port 8787 |
+| `npm start` | Serve `dist/` and all proxies on port 8787 |
 | `npm run typecheck` | Typecheck both TypeScript projects |
-| `npm run test:batch` | Offline tests for file conversion and the batch proxy relay |
+| `npm run test:batch` | Offline suites for legacy audio conversion + proxy relay |
 | `npm run preview` | Preview the Vite build |
 
 ### Environment variables
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `GNANI_API_KEY` | — | **Required.** Gnani API key, server-side only |
+| `GNANI_API_KEY` | — | **Required.** Gnani API key; verified at boot, server-side only |
 | `PORT` | `8787` | Server port |
 | `HOST` | `0.0.0.0` | Bind address |
-| `MAX_SESSIONS_PER_IP` | `2` | Concurrent Gnani streams per client IP |
-| `GNANI_STT_URL` | `wss://api.vachana.ai/stt/v3/stream` | Override the upstream endpoint |
-
-For local frontend development, `API_TARGET` (default `http://localhost:8787`) can point Vite's proxy at another backend.
-
----
-
-## API endpoints
-
-- `GET /api/health` → `{ status, model, language, sampleRate, configured }`
-- `WS /ws/stt/realtime` → realtime browser audio stream (binary 1,024-byte PCM frames) + JSON control frames
-- `WS /ws/stt/batch` → uploaded-file stream with the same frames plus `batch_ack` flow-control frames
-
-The proxy accepts only:
-
-- binary frames of exactly **1,024 bytes**
-- `{"type":"commit"}` control text frames
-
-Everything else is rejected or dropped and logged server-side. Batch sessions additionally receive `{"type":"batch_ack","frames":N}` so the browser can keep a bounded in-flight window.
+| `MAX_SESSIONS_PER_IP` | `2` | Concurrent realtime Gnani streams per client IP |
+| `GNANI_STT_URL` | `wss://api.vachana.ai/stt/v3/stream` | Override the realtime upstream (its host is reused for batch REST calls) |
+| `API_TARGET` (dev) | `http://localhost:8787` | Vite's proxy target for `/api` and `/ws` |
 
 ---
 
 ## Troubleshooting
 
-| Symptom | Fix |
+| Symptom | Cause & fix |
 | --- | --- |
-| "Microphone access was blocked" | Allow microphone access in the site settings, then reload. Look for the mic icon in the address bar. |
-| Mic prompt never appears | Use `http://localhost` or HTTPS. Browsers block `getUserMedia` on plain HTTP (except localhost). |
-| "No microphone was found" | Connect/enable an input device and check the OS input settings. |
-| `401` / "API credentials rejected" | `GNANI_API_KEY` is missing or invalid. Check `.env` and restart the server. |
-| "Too many active recording sessions" | A previous session is still open (or the per-IP cap was reached). Wait a few seconds / stop the other tab. |
-| No transcript while speaking | Speak for at least ~0.5 s, then pause. VAD emits a transcript when an utterance ends. Raise your mic input level if needed. |
-| Last sentence missing | It is finalized by trailing silence + `commit`; if the network dropped, the final wait times out. Try again. |
-| Session ends after 15 minutes | Gnani caps realtime sessions at 15 minutes. Start a new recording. Batch files are split into 12-minute sessions automatically. |
-| Batch upload says the file isn't audio | Use WAV, MP3, M4A, AAC, OGG, FLAC or WebM. Some browsers cannot decode certain codecs. |
-| Batch decode fails | Re-encode the file to WAV/MP3 or try a different browser; the file is decoded locally by the browser. |
-| Batch file rejected as too long | Batch files are limited to 30 minutes (100 MB). Trim the recording and try again. |
-| Batch finishes with "No speech detected" | The file was processed but VAD found no utterances. Check that it contains audible speech at a reasonable level. |
-| Port already in use | Set `PORT=xxxx` in `.env` and update `API_TARGET` if you also changed the dev proxy target. |
+| "Microphone access was blocked" / prompt never appears | Allow mic access in site settings; use `localhost` or HTTPS. Reload. |
+| `401` / "API credentials rejected" | `GNANI_API_KEY` missing/invalid — check `.env`, restart. |
+| `502` "Gnani batch… (400 INVALID_CONFIG) unsupported format" | Mixed-extension file; **rare now** — the server sniffs the magic bytes and renames before upload. If you still see it, the container is genuinely unusable by Gnani: re-encode to WAV/MP3. |
+| `429 RATE_LIMITED` | Normal burst limiting. The server retries automatically (watch for `Gnani rate limited; retrying` logs). If it persists after 4 attempts, wait ~1 min and click Generate again. |
+| Batch job stuck in `IN_PROGRESS` | Long files legitimately take minutes. Keep the tab open; polling continues. Cancel if needed. |
+| `504` "Could not reach the transcription service" | Your server couldn't reach `api.vachana.ai` — check internet/proxy/firewall. |
+| 422 "invalid character … `download`" | Should not occur (routes ordered correctly); means an old build is cached — rebuild (`npm run build`). |
+| "This file is larger than 10 MB" | Batch direct upload is capped at 10 MB. Compress to MP3/OGG, trim, or split the recording. |
+| Batch ends with `FAILED` / `START_FAILED` | Check the server log for the Gnani error body (`cancel_reason` is included in the UI). Silent audio fails with "Empty transcript after 3 retries". |
+| Batch finishes with "No speech detected" | Processed fully but no utterances found — verify the file contains audible speech. |
+| "Too many active recording sessions" | Realtime per-IP cap (`MAX_SESSIONS_PER_IP`, default 2). Stop another tab or wait a few seconds. |
+| No transcript while speaking live | VAD emits per finished utterance: speak ≥ ~0.5 s then pause. Raise mic input level. |
+| Last sentence missing (realtime) | The trailing-silence + `commit` finalize handles it; a network drop can still beat the timeout — retry. |
+| Port already in use | Set `PORT=xxxx` in `.env` and mirror it in `API_TARGET` for the dev proxy. |
 
-Server logs include session ids, frame counts, and upstream close codes — useful for debugging without exposing audio content or credentials.
-
----
-
-## Security & privacy notes
-
-- The Gnani API key is read from `.env` and attached **only** by the Node proxy. It is never included in the frontend bundle or sent to the browser.
-- Uploaded files are decoded in the browser; only raw 16 kHz PCM frames are streamed to the proxy and Gnani. Files are not uploaded to or stored by this server.
-- Raw audio is relayed in memory to Gnani and is not written to disk.
-- Transcripts live in the browser tab's memory; clearing the transcript or closing the tab removes them.
-- The proxy is intended for local/private deployment. If you expose it publicly, put it behind HTTPS and add your own auth/rate limiting.
+Server logs include session ids, frame counts, upstream close codes, rate-limit retries and Gnani error bodies — enough to debug without exposing audio content or credentials.
 
 ---
 
-## Scope / limitations
+## Security & privacy
 
-- Batch uploads are limited to 30 minutes / 100 MB and must be decodable by the browser.
-- No translation, speaker diarization, or user accounts.
-- Language detection is automatic (`indic-auto`); per-segment detection is shown from `detected_language_code`.
-- Realtime sessions are limited to 15 minutes by Gnani; reconnect for longer use. Batch files are chunked into 12-minute sessions, so long uploads complete without hitting the cap.
+- **Key isolation:** `GNANI_API_KEY` is read from `.env` and attached **only** by the Node server. It never appears in the frontend bundle, browser dev-tools, or logs.
+- **Realtime:** raw 16 kHz PCM is relayed in memory only — nothing written to disk, nothing stored.
+- **Batch:** the uploaded file lives in the server process memory (multer memory storage) only long enough to forward it to Gnani; transcripts are fetched, shaped, and discarded — never written to disk.
+- **Auth to Gnani / to browser:** the browser only ever talks to *your* server; jobs are keyed only by knowledge of that API surface.
+- **Transcript lifetime:** transcripts live in the tab's memory; clear or close the tab and they're gone.
+- **Exposure:** intended for local/private deployment. If you expose it publicly: terminate TLS, add your own auth + rate limiting in front, and keep the Gnani key server-side.
+
+---
+
+## Scope & current limitations
+
+- **Realtime diarization doesn't exist at Gnani** — diarization is a Gnani Batch Jobs API feature only, so it is wired to the batch path (that's exactly what we did).
+- Batch direct upload is capped at **10 MB**; files needing more require Gnani's presigned-upload flow (not implemented).
+- The legacy local-decode WebSocket batch path still exists (code + tests) but is not wired into the UI; the active batch path is the REST jobs flow above.
+- No translation, no user accounts/auth, no persisted history.
+- Language detection is automatic (`indic-auto`); realtime shows it per utterance, batch per segment (`language_detected`).
+- Poll-based progress is coarse (job-level counters, not audio-level seek bars).
+
+---
+
+## Credits & references
+
+- Powered by **Gnani Prisma v3.0** — Speech-to-Text for Indian languages.
+- Batch API reference: <https://docs.gnani.ai/api/STTBatch/Introduction.md>
+- Realtime WS reference: <https://docs.gnani.ai/api/STT/stt-websocket.md>
+- Diarization use case: <https://docs.gnani.ai/api/use-cases/podcast-transcription.md>
+- Gnani API dashboard: <https://app.gnani.ai/voice>

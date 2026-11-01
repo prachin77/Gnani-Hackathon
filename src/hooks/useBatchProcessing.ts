@@ -23,6 +23,7 @@ import type { ConnectionState, TranscriptSegment } from "./useAudioStreaming";
 
 export type BatchState =
   | "idle"
+  | "selected"
   | "preparing"
   | "connecting"
   | "processing"
@@ -112,6 +113,7 @@ export function useBatchProcessing() {
   const [elapsedMs, setElapsedMs] = useState(0);
   const [segmentCount, setSegmentCount] = useState(0);
   const [retryable, setRetryable] = useState(false);
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
 
   const stateRef = useRef<BatchState>("idle");
   const runIdRef = useRef(0);
@@ -614,6 +616,65 @@ export function useBatchProcessing() {
     [fail, runChunk, startElapsedTimer, stopElapsedTimer, updatePhase],
   );
 
+  /**
+   * Validates and stores the uploaded file without decoding or streaming.
+   * Moves the batch into a "selected" / ready state so the user can confirm
+   * with Generate Transcript before any audio is sent to the backend.
+   */
+  const select = useCallback(
+    (file: File) => {
+      if (
+        stateRef.current === "preparing" ||
+        stateRef.current === "connecting" ||
+        stateRef.current === "processing" ||
+        stateRef.current === "finalizing"
+      ) {
+        return;
+      }
+
+      try {
+        validateBatchFile(file);
+      } catch (failure) {
+        if (failure instanceof BatchInputError) {
+          setError(failure.message);
+          setRetryable(false);
+          updatePhase("error");
+          return;
+        }
+        throw failure;
+      }
+
+      setError(null);
+      setSegments([]);
+      setSegmentCount(0);
+      setRetryable(false);
+      setProgress(0);
+      setPreparePercent(0);
+      setProcessedMs(0);
+      setTotalMs(0);
+      setConnection("idle");
+
+      setSelectedFile(file);
+      setFileInfo({
+        name: file.name,
+        size: file.size,
+        type: file.type,
+        durationMs: 0,
+        sourceSampleRate: 0,
+        sourceChannels: 0,
+      });
+      updatePhase("selected");
+    },
+    [updatePhase],
+  );
+
+  /** Starts decoding and streaming the currently selected file. */
+  const generate = useCallback(() => {
+    const file = selectedFile;
+    if (!file) return;
+    void start(file);
+  }, [selectedFile, start]);
+
   const retry = useCallback(() => {
     if (!retryable) return;
     const file = lastFileRef.current;
@@ -659,6 +720,7 @@ export function useBatchProcessing() {
     runIdRef.current += 1;
     cancelRef.current = false;
     lastFileRef.current = null;
+    setSelectedFile(null);
     seenKeysRef.current.clear();
 
     const ws = wsRef.current;
@@ -726,8 +788,11 @@ export function useBatchProcessing() {
     elapsedMs,
     segmentCount,
     retryable,
+    selectedFile,
     maxDurationMs: MAX_BATCH_DURATION_MS,
     start,
+    select,
+    generate,
     retry,
     cancel,
     reset,

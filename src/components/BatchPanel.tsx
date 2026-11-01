@@ -7,6 +7,7 @@ import {
   ListChecks,
   Loader2,
   MicOff,
+  Play,
   RotateCcw,
   Square,
   UploadCloud,
@@ -29,9 +30,20 @@ interface BatchPanelProps {
   onCancel: () => void;
   onRetry: () => void;
   onReset: () => void;
+  onGenerate: () => void;
 }
 
-const BUSY_STATES: BatchState[] = ["preparing", "connecting", "processing", "finalizing"];
+const BUSY_STATES: string[] = [
+  "preparing",
+  "connecting",
+  "processing",
+  "finalizing",
+  // Diarization (REST) busy states
+  "uploading",
+  "starting",
+  "polling",
+  "downloading",
+];
 
 interface Tone {
   label: string;
@@ -41,7 +53,7 @@ interface Tone {
   icon: string;
 }
 
-function toneFor(state: BatchState): Tone {
+function toneFor(state: BatchState | string): Tone {
   switch (state) {
     case "preparing":
     case "connecting":
@@ -53,12 +65,38 @@ function toneFor(state: BatchState): Tone {
         bar: "bg-amber-500",
         icon: "bg-amber-50 text-amber-600 ring-amber-100",
       };
+    case "uploading":
+    case "starting":
+      return {
+        label: state === "uploading" ? "Uploading" : "Starting job",
+        pill: "bg-amber-50 text-amber-700 ring-amber-200",
+        dot: "bg-amber-500 recording-dot",
+        bar: "bg-amber-500",
+        icon: "bg-amber-50 text-amber-600 ring-amber-100",
+      };
+    case "polling":
+    case "downloading":
+      return {
+        label: state === "polling" ? "Diarizing" : "Fetching transcripts",
+        pill: "bg-indigo-50 text-indigo-700 ring-indigo-200",
+        dot: "bg-indigo-500 recording-dot",
+        bar: "bg-indigo-600",
+        icon: "bg-indigo-50 text-indigo-600 ring-indigo-100",
+      };
     case "processing":
       return {
         label: "Transcribing",
         pill: "bg-indigo-50 text-indigo-700 ring-indigo-200",
         dot: "bg-indigo-500 recording-dot",
         bar: "bg-indigo-600",
+        icon: "bg-indigo-50 text-indigo-600 ring-indigo-100",
+      };
+    case "selected":
+      return {
+        label: "Ready",
+        pill: "bg-indigo-50 text-indigo-700 ring-indigo-200",
+        dot: "bg-indigo-500",
+        bar: "bg-indigo-500",
         icon: "bg-indigo-50 text-indigo-600 ring-indigo-100",
       };
     case "complete":
@@ -96,12 +134,32 @@ function toneFor(state: BatchState): Tone {
   }
 }
 
-function statusCopy(state: BatchState): { title: string; hint: string } {
+function statusCopy(state: BatchState | string): { title: string; hint: string } {
   switch (state) {
     case "preparing":
       return {
         title: "Preparing your audio",
         hint: "Decoding the file and converting it to 16 kHz mono PCM.",
+      };
+    case "uploading":
+      return {
+        title: "Uploading your audio",
+        hint: "Sending the file to the server for speaker diarization.",
+      };
+    case "starting":
+      return {
+        title: "Starting the diarization job",
+        hint: "Gnani is queueing the speaker-separated transcription.",
+      };
+    case "polling":
+      return {
+        title: "Separating speakers",
+        hint: "Gnani is processing the file. Status is checked every 10 seconds — keep this tab open.",
+      };
+    case "downloading":
+      return {
+        title: "Fetching speaker transcript",
+        hint: "Downloading the diarized segments.",
       };
     case "connecting":
       return {
@@ -117,6 +175,11 @@ function statusCopy(state: BatchState): { title: string; hint: string } {
       return {
         title: "Finishing the last segments",
         hint: "Sending a commit and waiting for the final transcript.",
+      };
+    case "selected":
+      return {
+        title: "Ready to transcribe",
+        hint: "Your file is selected and validated. Click Generate Transcript to start processing.",
       };
     case "complete":
       return {
@@ -152,6 +215,7 @@ export function BatchPanel({
   onCancel,
   onRetry,
   onReset,
+  onGenerate,
 }: BatchPanelProps) {
   const tone = toneFor(state);
   const copy = statusCopy(state);
@@ -160,6 +224,7 @@ export function BatchPanel({
   const displayedTotal = totalMs || file?.durationMs || 0;
   const percent = Math.min(100, Math.max(0, isPreparing ? preparePercent : progress));
   const capturedNothing = state === "complete" && segmentCount === 0;
+  const showGenerate = state === "selected" || state === "idle";
 
   return (
     <section className="overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-sm shadow-slate-200/40">
@@ -353,7 +418,27 @@ export function BatchPanel({
         )}
 
         <div className="mt-5 flex flex-wrap items-center gap-2">
-          {state === "complete" && (
+          {showGenerate && (
+          <>
+            <button
+              type="button"
+              onClick={onGenerate}
+              className="inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-2.5 text-sm font-medium text-white shadow-sm shadow-indigo-600/20 transition-colors hover:bg-indigo-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600"
+            >
+              <Play className="h-4 w-4" aria-hidden="true" />
+              Generate Transcript
+            </button>
+            <button
+              type="button"
+              onClick={onReset}
+              className="inline-flex items-center rounded-lg px-4 py-2.5 text-sm font-medium transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600 border border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
+            >
+              Choose another file
+            </button>
+          </>
+        )}
+
+        {state === "complete" && (
             <button
               type="button"
               onClick={onReset}
