@@ -15,6 +15,7 @@ import {
   friendlySocketClose,
   isFatalServerError,
 } from "../lib/errors";
+import { convertRecordingToMp3 } from "../lib/encode";
 
 export type SessionState =
   | "idle"
@@ -57,6 +58,9 @@ function pickRecorderMime(): string | null {
 export function extensionForRecordingMime(mimeType: string): string {
   const base = mimeType.split(";")[0].trim().toLowerCase();
   switch (base) {
+    case "audio/mpeg":
+    case "audio/mp3":
+      return ".mp3";
     case "audio/ogg":
       return ".opus";
     case "audio/mp4":
@@ -145,7 +149,6 @@ export function useAudioStreaming() {
   const [analyser, setAnalyser] = useState<AnalyserNode | null>(null);
   const [sessionSegments, setSessionSegments] = useState(0);
   const [lastRecording, setLastRecording] = useState<RecordedSession | null>(null);
-
   const stateRef = useRef<SessionState>("idle");
   const wsRef = useRef<WebSocket | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
@@ -159,6 +162,7 @@ export function useAudioStreaming() {
   const recorderRef = useRef<MediaRecorder | null>(null);
   const recorderChunksRef = useRef<Blob[]>([]);
   const recorderStartedAtRef = useRef<number | null>(null);
+  const recordingIdRef = useRef(0);
 
   const recordingRef = useRef(false);
   const connectedRef = useRef(false);
@@ -241,6 +245,9 @@ export function useAudioStreaming() {
     if (!mimeType) return;
 
     try {
+      const recordingId = recordingIdRef.current + 1;
+      recordingIdRef.current = recordingId;
+
       const recorder = new MediaRecorder(stream, {
         mimeType,
         audioBitsPerSecond: 32_000,
@@ -258,12 +265,35 @@ export function useAudioStreaming() {
         const startedAt = recorderStartedAtRef.current;
         recorderStartedAtRef.current = null;
         if (chunks.length === 0) return;
+
         const type = recorder.mimeType || mimeType;
-        setLastRecording({
-          blob: new Blob(chunks, { type }),
-          mimeType: type,
-          durationMs: startedAt !== null ? Date.now() - startedAt : 0,
-        });
+        const raw = new Blob(chunks, { type });
+        const wallDurationMs = startedAt !== null ? Date.now() - startedAt : 0;
+
+        // MediaRecorder writes a live WebM stream with no duration metadata,
+        // which Gnani rejects ("file reports no usable duration"). Convert to
+        // MP3, which carries a real duration, before uploading.
+        void (async () => {
+          let recording: RecordedSession;
+          try {
+            const mp3 = await convertRecordingToMp3(raw);
+            recording = {
+              blob: mp3.blob,
+              mimeType: "audio/mpeg",
+              durationMs: mp3.durationMs || wallDurationMs,
+            };
+          } catch (conversionError) {
+            console.warn(
+              "[recorder] could not convert the session to MP3; uploading the raw recording",
+              conversionError,
+            );
+            recording = { blob: raw, mimeType: type, durationMs: wallDurationMs };
+          }
+
+          // A new session may have started (or been reset) while converting.
+          if (recordingIdRef.current !== recordingId) return;
+          setLastRecording(recording);
+        })();
       };
 
       // Emit a chunk every second so a hard stop still keeps the audio.
@@ -606,6 +636,7 @@ export function useAudioStreaming() {
     connectedRef.current = false;
     commitSentRef.current = false;
     closingRef.current = false;
+    recordingIdRef.current += 1;
     setLastRecording(null);
     updatePhase("requesting");
 
@@ -802,6 +833,7 @@ export function useAudioStreaming() {
     setSpeechActive(false);
     setIsProcessing(false);
     setElapsedMs(0);
+    recordingIdRef.current += 1;
     setLastRecording(null);
     updatePhase("idle");
   }, [disposeAudio, updatePhase]);

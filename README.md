@@ -59,6 +59,7 @@ Open **http://localhost:8787** — Express serves the built frontend and hosts b
 - Each finished utterance appears with a **language badge** (Prisma detects the language per utterance — Indian English, Hindi, Tamil, Telugu, Bengali, Marathi, Gujarati, Kannada, Malayalam, Punjabi, including code-switching).
 - Live waveform, recording timer, speech/processing indicators, connection status.
 - While recording, the mic audio is **also captured locally** with `MediaRecorder` (compressed WebM/Opus at 32 kbps) for the post-stop diarization step.
+- On **Stop**, that capture is decoded and re-encoded to **MP3** (16 kHz mono, 32 kbps). A real MP3 carries duration metadata; MediaRecorder's live WebM does not, and Gnani rejects such files with `file reports no usable duration ("")`.
 - **Stop** finalizes gracefully: trailing silence → `commit` → wait for the last transcript → close, so the final sentence is never lost.
 
 #### What happens on Stop (automatic)
@@ -70,7 +71,7 @@ Open **http://localhost:8787** — Express serves the built frontend and hosts b
    - **Live transcript (raw)** — exactly what streamed during recording, without speaker separation.
 4. If the session captured no speech, only the raw transcript card is shown.
 
-> MediaRecorder output is 32 kbps Opus, so even a 15-minute session stays around ~3.6 MB — comfortably under the 10 MB batch limit. If a browser has no `MediaRecorder` support, live transcription still works; only the automatic diarization is skipped.
+> MediaRecorder output is re-encoded to **MP3 at 32 kbps**, so even a 15-minute session stays around ~3.6 MB — comfortably under the 10 MB batch limit. If a browser has no `MediaRecorder` support, live transcription still works; only the automatic diarization is skipped.
 
 ### 2. Batch upload with speaker diarization
 
@@ -104,8 +105,10 @@ getUserMedia
 BATCH + DIARIZATION (REST jobs — uploaded file or recorded live session)
 Browser                          Node server                        Gnani
 ───────                          ───────────                        ─────
-live: MediaRecorder (Opus 32k)   (uploaded file path is identical;
-  → File("live-session.webm")     the recording is just another file)
+live: MediaRecorder (Opus 32k)
+  → decode to 16 kHz mono PCM
+  → MP3 encode (32 kbps)        (uploaded file path is identical;
+  → File("live-session.mp3")     the recording is just another file)
 POST /api/stt/batch/diarize ──►  multipart forward ────────────►   POST /stt/v3/batch/jobs
    (original file bytes)             config: model prisma-v3.0     → 201 { job_id, CREATED }
                                      format transcribe
@@ -188,6 +191,7 @@ x-max-speech-s:     30    ← forces a transcript mid-monologue so results keep 
 │   │   └── useBatchProcessing.ts   # Legacy local-decode WS batch (unused by UI, kept for tests)
 │   ├── lib/
 │   │   ├── pcm.ts                 # Resampler, frame emitter, WS URL builder
+│   │   ├── encode.ts              # WebM/Opus recording → 16 kHz mono PCM → MP3 (lamejs)
 │   │   ├── batch.ts               # File validation, decode, downmix, resample (legacy path)
 │   │   └── languages.ts, format.ts, errors.ts
 │   ├── public/
@@ -297,6 +301,7 @@ Useful for verifying the shared plumbing (resampler, framing, pacing, flow contr
 | `504` "Could not reach the transcription service" | Your server couldn't reach `api.vachana.ai` — check internet/proxy/firewall. |
 | 422 "invalid character … `download`" | Should not occur (routes ordered correctly); means an old build is cached — rebuild (`npm run build`). |
 | "This file is larger than 10 MB" | Batch direct upload is capped at 10 MB. Compress to MP3/OGG, trim, or split the recording. |
+| "file reports no usable duration" | Chrome's MediaRecorder WebM has no duration metadata. Fixed: the recording is re-encoded to MP3 before upload. If you still see it, the MP3 encoder failed in the browser — check the console for `[recorder]`. |
 | Batch ends with `FAILED` / `START_FAILED` | You now see Gnani's per-file reason in the UI (e.g. `Empty transcript after 3 retries`), and it is logged as `Gnani batch job files failed` on the server. Silent/tone-only audio fails this way; re-record with audible speech. |
 | Batch finishes with "No speech detected" | Processed fully but no utterances found — verify the file contains audible speech. |
 | "Too many active recording sessions" | Realtime per-IP cap (`MAX_SESSIONS_PER_IP`, default 2). Stop another tab or wait a few seconds. |
