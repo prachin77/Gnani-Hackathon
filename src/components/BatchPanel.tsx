@@ -31,6 +31,8 @@ interface BatchPanelProps {
   onRetry: () => void;
   onReset: () => void;
   onGenerate: () => void;
+  /** Where the audio came from: an uploaded file or the recorded live session. */
+  source?: "upload" | "live";
 }
 
 const BUSY_STATES: string[] = [
@@ -134,7 +136,52 @@ function toneFor(state: BatchState | string): Tone {
   }
 }
 
-function statusCopy(state: BatchState | string): { title: string; hint: string } {
+function statusCopy(
+  state: BatchState | string,
+  source: "upload" | "live" = "upload",
+): { title: string; hint: string } {
+  if (source === "live") {
+    switch (state) {
+      case "selected":
+        return {
+          title: "Preparing the live recording",
+          hint: "The captured session is about to be uploaded for speaker separation.",
+        };
+      case "uploading":
+        return {
+          title: "Uploading the recording",
+          hint: "Sending the captured live session to the server for speaker separation.",
+        };
+      case "starting":
+        return {
+          title: "Starting the diarization job",
+          hint: "Gnani is queueing the speaker-separated transcription.",
+        };
+      case "polling":
+        return {
+          title: "Separating speakers",
+          hint: "Gnani is processing the recorded session. Status is checked every 10 seconds — keep this tab open.",
+        };
+      case "downloading":
+        return {
+          title: "Fetching speaker transcript",
+          hint: "Downloading the diarized segments for this session.",
+        };
+      case "complete":
+        return {
+          title: "Speaker separation complete",
+          hint: "The diarized and the raw live transcripts are both shown below.",
+        };
+      case "error":
+        return {
+          title: "Speaker separation failed",
+          hint: "Your live transcript is still available below. Try again, or dismiss this panel.",
+        };
+      default:
+        break;
+    }
+  }
+
   switch (state) {
     case "preparing":
       return {
@@ -216,15 +263,17 @@ export function BatchPanel({
   onRetry,
   onReset,
   onGenerate,
+  source = "upload",
 }: BatchPanelProps) {
   const tone = toneFor(state);
-  const copy = statusCopy(state);
+  const copy = statusCopy(state, source);
   const isBusy = BUSY_STATES.includes(state);
   const isPreparing = state === "preparing";
   const displayedTotal = totalMs || file?.durationMs || 0;
   const percent = Math.min(100, Math.max(0, isPreparing ? preparePercent : progress));
   const capturedNothing = state === "complete" && segmentCount === 0;
-  const showGenerate = state === "selected" || state === "idle";
+  const showGenerate = source === "upload" && (state === "selected" || state === "idle");
+  const displayName = source === "live" ? "Live session recording" : (file?.name ?? "Audio file");
 
   return (
     <section className="overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-sm shadow-slate-200/40">
@@ -237,7 +286,7 @@ export function BatchPanel({
             {tone.label}
           </span>
           <span className="hidden text-[11px] font-medium text-slate-500 sm:inline">
-            Batch upload
+            {source === "live" ? "Live session · speaker separation" : "Batch upload"}
           </span>
         </div>
 
@@ -287,8 +336,8 @@ export function BatchPanel({
           </div>
 
           <div className="min-w-0 flex-1">
-            <p className="truncate text-sm font-semibold tracking-tight text-slate-900" title={file?.name}>
-              {file?.name ?? "Audio file"}
+            <p className="truncate text-sm font-semibold tracking-tight text-slate-900" title={displayName}>
+              {displayName}
             </p>
             <p className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-slate-500">
               {file && <span>{formatBytes(file.size)}</span>}
@@ -308,7 +357,7 @@ export function BatchPanel({
               ) : (
                 <>
                   <span className="text-slate-300" aria-hidden="true">·</span>
-                  <span>Converted to 16 kHz mono PCM</span>
+                  <span>{source === "live" ? "Recorded in the browser" : "Converted to 16 kHz mono PCM"}</span>
                 </>
               )}
             </p>
@@ -445,7 +494,7 @@ export function BatchPanel({
               className="inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-2.5 text-sm font-medium text-white shadow-sm shadow-indigo-600/20 transition-colors hover:bg-indigo-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600"
             >
               <UploadCloud className="h-4 w-4" aria-hidden="true" />
-              Transcribe another file
+              {source === "live" ? "Done" : "Transcribe another file"}
             </button>
           )}
 
@@ -470,7 +519,7 @@ export function BatchPanel({
                     : "bg-indigo-600 text-white shadow-sm shadow-indigo-600/20 hover:bg-indigo-700"
                 }`}
               >
-                Choose another file
+                {source === "live" ? "Dismiss" : "Choose another file"}
               </button>
             </>
           )}

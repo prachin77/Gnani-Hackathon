@@ -6,7 +6,7 @@ Two independent pipelines, one app:
 
 | | Realtime | Batch (uploaded file) |
 | --- | --- | --- |
-| Input | Microphone | Audio file (≤ 10 MB) |
+| Input | Microphone (live) | Audio file **or the recorded live session** (≤ 10 MB) |
 | Endpoint | `WS /ws/stt/realtime` → Gnani realtime WebSocket | `POST /api/stt/batch/diarize` → Gnani Batch Jobs REST API |
 | Output | Live transcript, language per utterance | Full transcript + **`speaker_id` per segment** (diarized) + timestamps |
 | Latency | Sub-second per utterance | Minutes (async job, polled every 10 s) |
@@ -58,7 +58,19 @@ Open **http://localhost:8787** — Express serves the built frontend and hosts b
 - Click **Record Audio** → your mic streams to Gnani through the secure proxy.
 - Each finished utterance appears with a **language badge** (Prisma detects the language per utterance — Indian English, Hindi, Tamil, Telugu, Bengali, Marathi, Gujarati, Kannada, Malayalam, Punjabi, including code-switching).
 - Live waveform, recording timer, speech/processing indicators, connection status.
+- While recording, the mic audio is **also captured locally** with `MediaRecorder` (compressed WebM/Opus at 32 kbps) for the post-stop diarization step.
 - **Stop** finalizes gracefully: trailing silence → `commit` → wait for the last transcript → close, so the final sentence is never lost.
+
+#### What happens on Stop (automatic)
+
+1. The whole live session recording is uploaded to the server and turned into a Gnani **Batch STT job** with `with_diarization: true` — no extra click, no second upload.
+2. The panel shows the usual diarization stages (*Uploading → Starting job → Diarizing → Fetching transcripts → Complete*).
+3. When it finishes you get **two transcripts side by side**:
+   - **Diarized transcript (speakers)** — green `Speaker N` badges and `start – end` timestamps. **This is the canonical text** to send to translation/summary.
+   - **Live transcript (raw)** — exactly what streamed during recording, without speaker separation.
+4. If the session captured no speech, only the raw transcript card is shown.
+
+> MediaRecorder output is 32 kbps Opus, so even a 15-minute session stays around ~3.6 MB — comfortably under the 10 MB batch limit. If a browser has no `MediaRecorder` support, live transcription still works; only the automatic diarization is skipped.
 
 ### 2. Batch upload with speaker diarization
 
@@ -73,7 +85,7 @@ Open **http://localhost:8787** — Express serves the built frontend and hosts b
 
 - Copy the whole transcript (with clipboard fallback for older browsers), confirm-to-clear.
 - Empty/error states explain what happened ("No speech detected", "No transcript produced").
-- Realtime and batch use **separate state**, so neither can clear or interrupt the other.
+- Realtime, live-session diarization and uploaded-file batch use **separate state**, so none can clear or interrupt the others.
 
 ---
 
@@ -89,9 +101,11 @@ getUserMedia
     mono 16 kHz                                                  ◄── connected / speech_start /
     s16le, 32 ms                                                     processing / transcript (JSON)
 
-BATCH + DIARIZATION (REST jobs)
+BATCH + DIARIZATION (REST jobs — uploaded file or recorded live session)
 Browser                          Node server                        Gnani
 ───────                          ───────────                        ─────
+live: MediaRecorder (Opus 32k)   (uploaded file path is identical;
+  → File("live-session.webm")     the recording is just another file)
 POST /api/stt/batch/diarize ──►  multipart forward ────────────►   POST /stt/v3/batch/jobs
    (original file bytes)             config: model prisma-v3.0     → 201 { job_id, CREATED }
                                      format transcribe
@@ -167,6 +181,7 @@ x-max-speech-s:     30    ← forces a transcript mid-monologue so results keep 
 │   │   ├── StatusBadge.tsx, ErrorBanner.tsx
 │   ├── hooks/
 │   │   ├── useAudioStreaming.ts    # Realtime: capture → WS → segments (state machine)
+│   │   │                           #   + MediaRecorder session capture for post-stop diarization
 │   │   ├── useBatchDiarization.ts  # Batch: select → generate → upload → poll → download
 │   │   └── useBatchProcessing.ts   # Legacy local-decode WS batch (unused by UI, kept for tests)
 │   ├── lib/
@@ -284,6 +299,7 @@ Useful for verifying the shared plumbing (resampler, framing, pacing, flow contr
 | Batch finishes with "No speech detected" | Processed fully but no utterances found — verify the file contains audible speech. |
 | "Too many active recording sessions" | Realtime per-IP cap (`MAX_SESSIONS_PER_IP`, default 2). Stop another tab or wait a few seconds. |
 | No transcript while speaking live | VAD emits per finished utterance: speak ≥ ~0.5 s then pause. Raise mic input level. |
+| Live session stops but no diarized transcript appears | The session captured no speech (`0` segments ⇒ diarization is skipped), the browser has no `MediaRecorder` support, or the recording exceeded 10 MB. The raw live transcript is still shown. |
 | Last sentence missing (realtime) | The trailing-silence + `commit` finalize handles it; a network drop can still beat the timeout — retry. |
 | Port already in use | Set `PORT=xxxx` in `.env` and mirror it in `API_TARGET` for the dev proxy. |
 
@@ -295,7 +311,8 @@ Server logs include session ids, frame counts, upstream close codes, rate-limit 
 
 - **Key isolation:** `GNANI_API_KEY` is read from `.env` and attached **only** by the Node server. It never appears in the frontend bundle, browser dev-tools, or logs.
 - **Realtime:** raw 16 kHz PCM is relayed in memory only — nothing written to disk, nothing stored.
-- **Batch:** the uploaded file lives in the server process memory (multer memory storage) only long enough to forward it to Gnani; transcripts are fetched, shaped, and discarded — never written to disk.
+- **Live recording:** the optional `MediaRecorder` capture lives in browser memory and is discarded when the session is reset or the tab closes.
+- **Batch:** the uploaded file (including the auto-uploaded live session) lives in the server process memory (multer memory storage) only long enough to forward it to Gnani; transcripts are fetched, shaped, and discarded — never written to disk.
 - **Auth to Gnani / to browser:** the browser only ever talks to *your* server; jobs are keyed only by knowledge of that API surface.
 - **Transcript lifetime:** transcripts live in the tab's memory; clear or close the tab and they're gone.
 - **Exposure:** intended for local/private deployment. If you expose it publicly: terminate TLS, add your own auth + rate limiting in front, and keep the Gnani key server-side.
@@ -304,7 +321,9 @@ Server logs include session ids, frame counts, upstream close codes, rate-limit 
 
 ## Scope & current limitations
 
-- **Realtime diarization doesn't exist at Gnani** — diarization is a Gnani Batch Jobs API feature only, so it is wired to the batch path (that's exactly what we did).
+- **Realtime diarization doesn't exist at Gnani** — diarization is a Gnani Batch Jobs API feature only. Live recording still streams the plain realtime transcript, and on **Stop** the captured session is sent through the batch path automatically so you get the diarized text too.
+- Live-session diarization is skipped when the browser has no `MediaRecorder` support or the session captured no speech.
+- A live session longer than ~40 minutes at 32 kbps can exceed the 10 MB batch cap; the live transcript is unaffected, but speaker separation will fail for that session.
 - Batch direct upload is capped at **10 MB**; files needing more require Gnani's presigned-upload flow (not implemented).
 - The legacy local-decode WebSocket batch path still exists (code + tests) but is not wired into the UI; the active batch path is the REST jobs flow above.
 - No translation, no user accounts/auth, no persisted history.

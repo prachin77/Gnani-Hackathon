@@ -18,6 +18,10 @@ interface LiveTranscriptionProps {
   mode?: "live" | "batch";
   emptyTitle?: string;
   emptyDescription?: string;
+  /** Overrides the default panel heading. */
+  title?: string;
+  /** Overrides the footer note on the left. */
+  footerNote?: string;
 }
 
 function transcriptText(segments: TranscriptSegment[]): string {
@@ -58,6 +62,8 @@ export function LiveTranscription({
   mode = "live",
   emptyTitle,
   emptyDescription,
+  title,
+  footerNote,
 }: LiveTranscriptionProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const previousCountRef = useRef(segments.length);
@@ -139,7 +145,7 @@ export function LiveTranscription({
         <div className="flex min-w-0 items-center gap-2">
           <ScrollText className="h-4 w-4 shrink-0 text-slate-400" aria-hidden="true" />
           <h2 className="text-sm font-semibold tracking-tight text-slate-900">
-            {isBatch ? "Batch Transcription" : "Live Transcription"}
+            {title ?? (isBatch ? "Batch Transcription" : "Live Transcription")}
           </h2>
           <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-semibold tabular-nums text-slate-500">
             {segments.length} {segments.length === 1 ? "segment" : "segments"}
@@ -301,11 +307,12 @@ export function LiveTranscription({
 
       <div className="flex items-center justify-between border-t border-slate-100 px-4 py-2 text-[10px] text-slate-400 sm:px-5">
         <span>
-          {hasDiarization
-            ? "Speaker-separated transcript (batch diarization)."
-            : isBatch
-            ? "Every segment from the uploaded file."
-            : "Language is detected per utterance."}
+          {footerNote ??
+            (hasDiarization
+              ? "Speaker-separated transcript (batch diarization)."
+              : isBatch
+                ? "Every segment from the uploaded file."
+                : "Language is detected per utterance.")}
         </span>
         <span>Kept until you clear it.</span>
       </div>

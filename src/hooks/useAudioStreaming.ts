@@ -28,6 +28,51 @@ export type SessionState =
 
 export type ConnectionState = "idle" | "connecting" | "connected" | "error";
 
+export interface RecordedSession {
+  blob: Blob;
+  mimeType: string;
+  durationMs: number;
+}
+
+/** Picks the best compressed container the browser can record. */
+function pickRecorderMime(): string | null {
+  if (typeof MediaRecorder === "undefined") return null;
+  const candidates = [
+    "audio/webm;codecs=opus",
+    "audio/webm",
+    "audio/ogg;codecs=opus",
+    "audio/mp4",
+  ];
+  for (const candidate of candidates) {
+    try {
+      if (MediaRecorder.isTypeSupported(candidate)) return candidate;
+    } catch {
+      // isTypeSupported can throw in quirky browsers; just skip.
+    }
+  }
+  return null;
+}
+
+/** Maps a recorded MIME type to a file extension Gnani accepts. */
+export function extensionForRecordingMime(mimeType: string): string {
+  const base = mimeType.split(";")[0].trim().toLowerCase();
+  switch (base) {
+    case "audio/ogg":
+      return ".opus";
+    case "audio/mp4":
+    case "audio/m4a":
+    case "audio/x-m4a":
+      return ".m4a";
+    case "audio/webm":
+      return ".webm";
+    case "audio/wav":
+    case "audio/x-wav":
+      return ".wav";
+    default:
+      return ".webm";
+  }
+}
+
 export interface TranscriptSegment {
   key: string;
   text: string;
@@ -99,6 +144,7 @@ export function useAudioStreaming() {
   const [isProcessing, setIsProcessing] = useState(false);
   const [analyser, setAnalyser] = useState<AnalyserNode | null>(null);
   const [sessionSegments, setSessionSegments] = useState(0);
+  const [lastRecording, setLastRecording] = useState<RecordedSession | null>(null);
 
   const stateRef = useRef<SessionState>("idle");
   const wsRef = useRef<WebSocket | null>(null);
@@ -110,6 +156,9 @@ export function useAudioStreaming() {
   const workletRef = useRef<AudioWorkletNode | null>(null);
   const scriptProcessorRef = useRef<ScriptProcessorNode | null>(null);
   const frameEmitterRef = useRef<PcmFrameEmitter | null>(null);
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const recorderChunksRef = useRef<Blob[]>([]);
+  const recorderStartedAtRef = useRef<number | null>(null);
 
   const recordingRef = useRef(false);
   const connectedRef = useRef(false);
@@ -185,8 +234,67 @@ export function useAudioStreaming() {
     [resolveStopWaiter],
   );
 
+  const startRecorder = useCallback((stream: MediaStream) => {
+    const mimeType = pickRecorderMime();
+    // Without MediaRecorder support the live transcript still works; only the
+    // post-stop diarization is unavailable.
+    if (!mimeType) return;
+
+    try {
+      const recorder = new MediaRecorder(stream, {
+        mimeType,
+        audioBitsPerSecond: 32_000,
+      });
+      recorderChunksRef.current = [];
+      recorderStartedAtRef.current = Date.now();
+
+      recorder.ondataavailable = (event) => {
+        if (event.data && event.data.size > 0) recorderChunksRef.current.push(event.data);
+      };
+
+      recorder.onstop = () => {
+        const chunks = recorderChunksRef.current;
+        recorderChunksRef.current = [];
+        const startedAt = recorderStartedAtRef.current;
+        recorderStartedAtRef.current = null;
+        if (chunks.length === 0) return;
+        const type = recorder.mimeType || mimeType;
+        setLastRecording({
+          blob: new Blob(chunks, { type }),
+          mimeType: type,
+          durationMs: startedAt !== null ? Date.now() - startedAt : 0,
+        });
+      };
+
+      // Emit a chunk every second so a hard stop still keeps the audio.
+      recorder.start(1000);
+      recorderRef.current = recorder;
+    } catch (recorderError) {
+      console.warn("[recorder] could not record the live session", recorderError);
+    }
+  }, []);
+
+  const stopRecorder = useCallback(() => {
+    const recorder = recorderRef.current;
+    recorderRef.current = null;
+    if (!recorder) return;
+
+    try {
+      if (recorder.state !== "inactive") {
+        // onstop builds the blob and publishes `lastRecording`.
+        recorder.stop();
+        return;
+      }
+    } catch {
+      // fall through to cleanup
+    }
+    recorderStartedAtRef.current = null;
+    recorderChunksRef.current = [];
+  }, []);
+
   const disposeAudio = useCallback(() => {
     recordingRef.current = false;
+    stopRecorder();
 
     try {
       workletRef.current?.port.postMessage({ type: "stop" });
@@ -222,7 +330,7 @@ export function useAudioStreaming() {
     }
 
     setAnalyser(null);
-  }, []);
+  }, [stopRecorder]);
 
   const finishStop = useCallback(() => {
     stopDurationTimer(true);
@@ -498,6 +606,7 @@ export function useAudioStreaming() {
     connectedRef.current = false;
     commitSentRef.current = false;
     closingRef.current = false;
+    setLastRecording(null);
     updatePhase("requesting");
 
     try {
@@ -553,6 +662,10 @@ export function useAudioStreaming() {
     setError(null);
     setConnection("connecting");
     updatePhase("connecting");
+
+    if (mediaStreamRef.current) {
+      startRecorder(mediaStreamRef.current);
+    }
 
     const ws = (() => {
       try {
@@ -620,7 +733,7 @@ export function useAudioStreaming() {
 
       fail(friendlySocketClose(event.code));
     };
-  }, [clearConnectTimer, fail, finishStop, handleFrame, resolveStopWaiter, updatePhase]);
+  }, [clearConnectTimer, fail, finishStop, handleFrame, resolveStopWaiter, startRecorder, updatePhase]);
 
   const stop = useCallback(async () => {
     const phase = stateRef.current;
@@ -689,6 +802,7 @@ export function useAudioStreaming() {
     setSpeechActive(false);
     setIsProcessing(false);
     setElapsedMs(0);
+    setLastRecording(null);
     updatePhase("idle");
   }, [disposeAudio, updatePhase]);
 
@@ -738,6 +852,7 @@ export function useAudioStreaming() {
     isProcessing,
     analyser,
     sessionSegments,
+    lastRecording,
     prepare,
     start,
     stop,

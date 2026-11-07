@@ -1,3 +1,4 @@
+import { useEffect, useRef, useState } from "react";
 import { BatchPanel } from "./components/BatchPanel";
 import { ErrorBanner } from "./components/ErrorBanner";
 import { Header } from "./components/Header";
@@ -5,39 +6,113 @@ import { LiveTranscription } from "./components/LiveTranscription";
 import { RecordingPanel } from "./components/RecordingPanel";
 import { StartActions } from "./components/StartActions";
 import type { BatchState } from "./hooks/useBatchProcessing";
-import { useAudioStreaming } from "./hooks/useAudioStreaming";
+import {
+  extensionForRecordingMime,
+  useAudioStreaming,
+} from "./hooks/useAudioStreaming";
 import { useBatchDiarization } from "./hooks/useBatchDiarization";
+
+type DiarizeSource = "upload" | "live" | null;
+
+const DIARIZE_BUSY_STATES: string[] = [
+  "uploading",
+  "created",
+  "starting",
+  "polling",
+  "downloading",
+];
 
 export default function App() {
   const audio = useAudioStreaming();
   const diarize = useBatchDiarization();
 
+  /** Where the audio currently being diarized came from. */
+  const [diarizeSource, setDiarizeSource] = useState<DiarizeSource>(null);
+  /** Guards the auto-diarization so a live session only triggers it once. */
+  const liveDiarizeStartedRef = useRef(false);
+
+  const liveSource = diarizeSource === "live";
   const batchActive = diarize.state !== "idle";
   const realtimeVisible = audio.state !== "idle" && audio.state !== "error";
   const showStartActions = !batchActive && (audio.state === "idle" || audio.state === "error");
 
-  const transcriptProcessing = batchActive
-    ? diarize.state === "uploading" ||
-      diarize.state === "created" ||
-      diarize.state === "starting" ||
-      diarize.state === "polling" ||
-      diarize.state === "downloading"
-    : audio.isProcessing;
+  // When a live session finishes, upload the captured audio to the batch
+  // diarization API automatically. The realtime transcript above/below stays.
+  useEffect(() => {
+    if (audio.state !== "stopped") return;
+    if (liveDiarizeStartedRef.current) return;
+
+    const recording = audio.lastRecording;
+    if (!recording) return; // Recording may still be finalizing; wait for it.
+
+    liveDiarizeStartedRef.current = true;
+
+    // A silent session has nothing to separate; keep the live transcript only.
+    if (audio.sessionSegments === 0) return;
+
+    const extension = extensionForRecordingMime(recording.mimeType);
+    const file = new File([recording.blob], `live-session${extension}`, {
+      type: recording.mimeType || "audio/webm",
+    });
+
+    setDiarizeSource("live");
+    void diarize.run(file);
+  }, [audio.state, audio.lastRecording, audio.sessionSegments, diarize]);
+
+  // Arm the guard again for every new live session.
+  useEffect(() => {
+    if (audio.state === "idle" || audio.state === "requesting" || audio.state === "ready") {
+      liveDiarizeStartedRef.current = false;
+    }
+  }, [audio.state]);
+
+  const transcriptProcessing = DIARIZE_BUSY_STATES.includes(diarize.state);
 
   const batchEmpty =
     diarize.state === "complete"
       ? {
           title: "No speech detected",
-          description:
-            "The file was processed from start to finish, but no utterances were found.",
+          description: liveSource
+            ? "The recorded session was processed from start to finish, but no utterances were found."
+            : "The file was processed from start to finish, but no utterances were found.",
         }
       : diarize.state === "error"
         ? {
-            title: "No transcript produced",
-            description:
-              "The file could not be transcribed. Try again or choose a different file.",
+            title: liveSource ? "Speaker separation failed" : "No transcript produced",
+            description: liveSource
+              ? "The recorded session could not be speaker-separated. Your live transcript below is unaffected."
+              : "The file could not be transcribed. Try again or choose a different file.",
           }
         : undefined;
+
+  const handleFile = (file: File) => {
+    liveDiarizeStartedRef.current = true; // Uploads must never trigger live logic.
+    setDiarizeSource("upload");
+    void diarize.select(file);
+  };
+
+  const closeDiarization = () => {
+    diarize.reset();
+    setDiarizeSource(null);
+  };
+
+  const handleCancelDiarization = () => {
+    diarize.cancel();
+    setDiarizeSource(null);
+  };
+
+  const handleNewSession = () => {
+    liveDiarizeStartedRef.current = false;
+    if (liveSource) diarize.reset();
+    setDiarizeSource(null);
+    void audio.prepare();
+  };
+
+  const handleDone = () => {
+    if (liveSource) diarize.reset();
+    setDiarizeSource(null);
+    audio.reset();
+  };
 
   return (
     <div className="relative flex min-h-dvh flex-col">
@@ -56,7 +131,7 @@ export default function App() {
           <p className="mt-1.5 max-w-2xl text-sm leading-6 text-slate-500 sm:text-[15px]">
             Speak naturally in Hindi, English, Gujarati, Tamil and other supported
             languages, or upload a recording to transcribe it from beginning to end.
-            Uploaded files also get automatic speaker separation.
+            Everything with multiple voices is split by speaker.
           </p>
         </div>
 
@@ -70,13 +145,10 @@ export default function App() {
           )}
 
           {showStartActions && (
-            <StartActions
-              onRecord={() => void audio.prepare()}
-              onFile={(file) => void diarize.select(file)}
-            />
+            <StartActions onRecord={() => void audio.prepare()} onFile={handleFile} />
           )}
 
-          {!batchActive && realtimeVisible && (
+          {realtimeVisible && (!batchActive || liveSource) && (
             <RecordingPanel
               state={audio.state}
               elapsedMs={audio.elapsedMs}
@@ -86,13 +158,14 @@ export default function App() {
               sessionSegments={audio.sessionSegments}
               onStart={audio.start}
               onStop={() => void audio.stop()}
-              onNewSession={() => void audio.prepare()}
-              onClose={audio.reset}
+              onNewSession={handleNewSession}
+              onClose={handleDone}
             />
           )}
 
           {batchActive && (
             <BatchPanel
+              source={liveSource ? "live" : "upload"}
               state={diarize.state as BatchState}
               file={
                 diarize.fileInfo
@@ -100,7 +173,7 @@ export default function App() {
                       name: diarize.fileInfo.name,
                       size: diarize.fileInfo.size,
                       type: diarize.fileInfo.type,
-                      durationMs: 0,
+                      durationMs: liveSource ? (audio.lastRecording?.durationMs ?? 0) : 0,
                       sourceSampleRate: 0,
                       sourceChannels: 0,
                     }
@@ -114,22 +187,47 @@ export default function App() {
               elapsedMs={0}
               error={diarize.error}
               canRetry={diarize.state === "error"}
-              onCancel={diarize.cancel}
+              onCancel={handleCancelDiarization}
               onRetry={diarize.generate}
-              onReset={diarize.reset}
+              onReset={closeDiarization}
               onGenerate={diarize.generate}
             />
           )}
 
-          <LiveTranscription
-            segments={batchActive ? diarize.segments : audio.segments}
-            isProcessing={transcriptProcessing}
-            state={batchActive ? "idle" : audio.state}
-            onClear={batchActive ? diarize.reset : audio.clearTranscript}
-            mode={batchActive ? "batch" : "live"}
-            emptyTitle={batchActive ? batchEmpty?.title : undefined}
-            emptyDescription={batchActive ? batchEmpty?.description : undefined}
-          />
+          {liveSource ? (
+            <>
+              <LiveTranscription
+                title="Diarized transcript (speakers)"
+                segments={diarize.segments}
+                isProcessing={transcriptProcessing}
+                state="idle"
+                onClear={diarize.reset}
+                mode="batch"
+                emptyTitle={batchEmpty?.title}
+                emptyDescription={batchEmpty?.description}
+                footerNote="Speaker-separated transcript of the recorded session — use this one for translation and summary."
+              />
+              <LiveTranscription
+                title="Live transcript (raw)"
+                segments={audio.segments}
+                isProcessing={audio.isProcessing}
+                state={audio.state}
+                onClear={audio.clearTranscript}
+                mode="live"
+                footerNote="Exactly what streamed live during the recording, without speaker separation."
+              />
+            </>
+          ) : (
+            <LiveTranscription
+              segments={batchActive ? diarize.segments : audio.segments}
+              isProcessing={batchActive ? transcriptProcessing : audio.isProcessing}
+              state={batchActive ? "idle" : audio.state}
+              onClear={batchActive ? diarize.reset : audio.clearTranscript}
+              mode={batchActive ? "batch" : "live"}
+              emptyTitle={batchActive ? batchEmpty?.title : undefined}
+              emptyDescription={batchActive ? batchEmpty?.description : undefined}
+            />
+          )}
         </div>
       </main>
 
