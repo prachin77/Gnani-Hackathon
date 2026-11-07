@@ -38,7 +38,7 @@ export const config = {
   gemini: {
     baseUrl: process.env.GEMINI_BASE_URL ?? "https://generativelanguage.googleapis.com",
     apiKey: (process.env.GEMINI_API_KEY ?? "").trim(),
-    model: (process.env.GEMINI_MODEL ?? "gemini-2.5-flash").trim(),
+    model: (process.env.GEMINI_MODEL ?? "gemini-3.8-flash").trim(),
     /** Free tier is about 1,500 requests/day; we send exactly one per transcript. */
     dailyLimit: intFromEnv("GEMINI_DAILY_LIMIT", 1500),
   },
