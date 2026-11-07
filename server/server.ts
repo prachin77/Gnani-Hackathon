@@ -16,6 +16,7 @@ import {
   startDiarizeJob,
 } from "./gnaniBatch";
 import { attachSttProxy } from "./gnaniWebSocket";
+import { analyzeMedicalTranscript, type AnalyzeSegmentInput } from "./gemini";
 import { logger } from "./logger";
 
 assertConfig();
@@ -186,6 +187,65 @@ app.post("/api/stt/batch/diarize/:jobId/cancel", async (req, res) => {
       error: (error as Error).message,
     });
     res.status(502).json({ error: (error as Error).message });
+  }
+});
+
+// Gemini clinical translation + summary. JSON only, one request per transcript.
+app.use("/api/ai", express.json({ limit: "1mb" }));
+
+app.post("/api/ai/analyze", async (req, res) => {
+  const body = (req.body ?? {}) as { segments?: unknown; source?: unknown };
+  const source = body.source === "live" ? "live" : "upload";
+
+  if (!Array.isArray(body.segments) || body.segments.length === 0) {
+    res.status(400).json({ error: "No transcript segments provided." });
+    return;
+  }
+
+  const segments: AnalyzeSegmentInput[] = [];
+  for (const entry of body.segments.slice(0, 2000)) {
+    if (!entry || typeof entry !== "object") continue;
+    const value = entry as Record<string, unknown>;
+    const text = typeof value.text === "string" ? value.text.trim() : "";
+    if (!text) continue;
+
+    const toNumber = (input: unknown): number | null =>
+      typeof input === "number" && Number.isFinite(input) ? input : null;
+
+    segments.push({
+      speaker:
+        typeof value.speaker === "string" || typeof value.speaker === "number"
+          ? value.speaker
+          : null,
+      startSeconds: toNumber(value.startSeconds),
+      endSeconds: toNumber(value.endSeconds),
+      text: text.slice(0, 4000),
+    });
+  }
+
+  if (segments.length === 0) {
+    res.status(400).json({ error: "No usable transcript segments provided." });
+    return;
+  }
+
+  const startedAt = Date.now();
+  try {
+    const analysis = await analyzeMedicalTranscript(segments, source);
+    logger.info("Gemini analysis completed", {
+      source,
+      segments: segments.length,
+      durationMs: Date.now() - startedAt,
+    });
+    res.json({ analysis, model: config.gemini.model });
+  } catch (error) {
+    const err = error as Error & { status?: number };
+    logger.error("Gemini analysis failed", {
+      source,
+      segments: segments.length,
+      error: err.message,
+    });
+    const status = err.status && err.status >= 400 && err.status < 600 ? err.status : 502;
+    res.status(status).json({ error: err.message });
   }
 });
 

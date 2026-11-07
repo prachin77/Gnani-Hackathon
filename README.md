@@ -24,6 +24,7 @@ No translation, no simulated text, no user accounts — and the **Gnani API key 
 
    ```env
    GNANI_API_KEY=your-gnani-api-key
+   GEMINI_API_KEY=your-gemini-api-key
    PORT=8787
    ```
 
@@ -67,10 +68,11 @@ Open **http://localhost:8787** — Express serves the built frontend and hosts b
 
 1. The whole live session recording is uploaded to the server and turned into a Gnani **Batch STT job** (Prisma v3.0) — no extra click, no second upload.
 2. The panel shows the usual diarization stages (*Uploading → Starting job → Diarizing → Fetching transcripts → Complete*).
-3. When it finishes you get **two transcripts side by side**:
-   - **Diarized transcript (speakers)** — green `Speaker N` badges and `start – end` timestamps. **This is the canonical text** to send to translation/summary.
+3. When it finishes you get:
+   - **English translation** and a **clinical summary** (e-prescription, suggested reports, medication flags) from Gemini — automatic, one request.
+   - **Diarized transcript (speakers)** — green `Speaker N` badges and `start – end` timestamps. **This is the canonical text** sent for translation/summary.
    - **Live transcript (raw)** — exactly what streamed during recording, without speaker separation.
-4. If the session captured no speech, only the raw transcript card is shown.
+4. Every card has a download button (`.txt` for transcripts/translation, `.md` for the summary).
 
 > The session is encoded to **MP3 at 32 kbps**, so even a 15-minute session stays around ~3.6 MB — comfortably under the 10 MB batch limit. The PCM buffer is ~28.8 MB per 15 minutes in browser memory (realtime sessions are capped by Gnani), and it is released on Reset/Done.
 
@@ -79,11 +81,36 @@ Open **http://localhost:8787** — Express serves the built frontend and hosts b
 1. Click **Upload Audio** and choose a file → the app validates it and shows a **ready state**. Nothing is sent yet in this confirmed two-step flow.
 2. Click **Generate Transcript** → the file uploads to *your* server, which creates a Gnani **Batch STT job** (Prisma v3.0).
 3. The panel tracks every stage — *Ready → Uploading → Starting job → Diarizing → Fetching transcripts → Complete* — with a progress bar. Status is polled every 10 s automatically.
-4. When done, segments appear with green **Speaker N** badges and `start – end` timestamps. Cancel stops local polling **and** asks Gnani to cancel the running job (best effort).
+4. When done, segments appear with green **Speaker N** badges and `start – end` timestamps, followed by the **English translation**, **e-prescription**, **suggested reports** and **clinical summary**. Every card is downloadable. Cancel stops local polling **and** asks Gnani to cancel the running job (best effort).
 
 **You upload once, click once.** Diarization is configured entirely on the backend — the frontend has no language, model or speaker options.
 
-### 3. Transcript panel
+### 3. AI translation, e-prescription & summary (Gemini)
+
+Once the **diarized** transcript is ready — for a live session *and* for an uploaded file — the app automatically sends it (with speaker + timestamp metadata) to Gemini **once**:
+
+- **English translation** of every segment, speaker-labelled, in order.
+- **Clinical summary** in sections: overview, chief complaints, history, **e-prescription**, **suggested reports & investigations**, advice, follow-up, red flags and notes.
+
+The prompt is tuned for Indian clinical conversations:
+
+- **Medication-name repair** using Indian brand/generic knowledge — e.g. “AC lock” → **Aciloc (ranitidine)**, “dolocitamol” → likely **Paracetamol**, “montek lc” → **Montek LC**. Corrections require strong phonetic evidence; otherwise the spoken form is kept.
+- **Medication flags** when a name looks like a corrupted *different* drug or is implausible (`misheardName`, `unknownMedicine`, `wrongDose`, `duplicateTherapy`, `allergyRisk`), with a severity and a one-line explanation.
+- **No invention:** doses, frequencies, durations and tests are only recorded when actually said; everything else is `null`/empty.
+- Any mentioned test/report (CBC, HbA1c, X-ray, ultrasound, …) is listed under **Suggested reports**.
+
+Each artifact is downloadable:
+
+| Artifact | Live | Upload | Format |
+| --- | --- | --- | --- |
+| Live transcript (raw) | ✅ | — | `.txt` |
+| Diarized transcript (as spoken) | ✅ | ✅ | `.txt` |
+| English translation | ✅ | ✅ | `.txt` |
+| Clinical summary | ✅ | ✅ | `.md` |
+
+The Gemini key is server-side only. Free tier ≈ **1,500 requests/day**, and the app makes exactly **one request per completed transcript**, so a full day of demos fits comfortably. On `429` the UI says the daily limit was reached; nothing else breaks.
+
+### 4. Transcript panel
 
 - Copy the whole transcript (with clipboard fallback for older browsers), confirm-to-clear.
 - Empty/error states explain what happened ("No speech detected", "No transcript produced").
@@ -120,6 +147,15 @@ GET  /:id (every 10 s) ──────►  ───── polling ───�
 GET  /:id/files ─────────────►  ─────────────────────────────►  GET .../files?status=COMPLETED
 GET  /download?url=... ──────►  fetch transcript_url ─────────►  (presigned URL)
                                   ◄── segments[] with speaker_id ─
+
+AI ANALYSIS (one Gemini request per completed diarized transcript)
+Browser                          Node server                        Gemini
+───────                          ───────────                        ──────
+POST /api/ai/analyze ────────►  /v1beta/models/<model>:generateContent
+  { source, segments[] }          + x-goog-api-key (server-side) ──►
+                                  ◄── structured JSON: translatedSegments
+                                       + summary (eRx, reports, flags)
+  ◄── { analysis, model }         responseMimeType: application/json
 ```
 
 ### What the server does for batch (all transparent to the user)
@@ -170,17 +206,19 @@ x-max-speech-s:     30    ← forces a transcript mid-monologue so results keep 
 ```
 .
 ├── server/
-│   ├── server.ts              # Express app: static hosting, /api/health, batch diarization routes
+│   ├── server.ts              # Express app: static hosting, /api/health, batch diarization + AI routes
 │   ├── gnaniWebSocket.ts      # Realtime WS proxy (+ legacy /ws/stt/batch streaming path)
 │   ├── gnaniBatch.ts          # Gnani Batch Jobs REST client: create/start/poll/files/download/cancel,
 │   │                          #   magic-byte extension sniffing, 429 retry wrapper
-│   ├── config.ts              # .env loading, Gnani session constants
+│   ├── gemini.ts              # Gemini client: clinical prompt, response schema, error mapping
+│   ├── config.ts              # .env loading, Gnani session constants, Gemini settings
 │   └── logger.ts              # Structured JSON-ish console logger
 ├── src/
 │   ├── App.tsx                # One app state: realtime or batch (disjoint), wiring
 │   ├── components/
 │   │   ├── BatchPanel.tsx     # Two-step upload→Generate, stage pills, progress, cancel/retry
-│   │   ├── LiveTranscription.tsx  # Shared transcript panel; Speaker N badges + segment times
+│   │   ├── LiveTranscription.tsx  # Shared transcript panel; Speaker N badges, download
+│   │   ├── AnalysisPanel.tsx  # English translation + clinical summary (eRx, reports, flags)
 │   │   ├── StartActions.tsx   # Record / Upload entry cards
 │   │   ├── RecordingPanel.tsx, AudioVisualizer.tsx, Header.tsx,
 │   │   ├── StatusBadge.tsx, ErrorBanner.tsx
@@ -188,12 +226,17 @@ x-max-speech-s:     30    ← forces a transcript mid-monologue so results keep 
 │   │   ├── useAudioStreaming.ts    # Realtime: capture → WS → segments (state machine)
 │   │   │                           #   + PCM capture → MP3 for post-stop diarization
 │   │   ├── useBatchDiarization.ts  # Batch: select → generate → upload → poll → download
+│   │   ├── useTranscriptAnalysis.ts # One Gemini request per diarized transcript
 │   │   └── useBatchProcessing.ts   # Legacy local-decode WS batch (unused by UI, kept for tests)
 │   ├── lib/
 │   │   ├── pcm.ts                 # Resampler, frame emitter, WS URL builder
 │   │   ├── encode.ts              # 16 kHz mono PCM → MP3 (@breezystack/lamejs) / WAV fallback
+│   │   ├── analysis.ts            # Gemini JSON normalization + transcript/summary exports
+│   │   ├── download.ts            # Client-side text/Markdown download helper
 │   │   ├── batch.ts               # File validation, decode, downmix, resample (legacy path)
 │   │   └── languages.ts, format.ts, errors.ts
+│   ├── types/
+│   │   └── analysis.ts            # Translation + clinical summary types
 │   ├── public/
 │   │   ├── pcm-processor.js       # AudioWorklet: mono 16 kHz s16le, 512-sample frames
 │   │   └── favicon.svg
@@ -202,7 +245,7 @@ x-max-speech-s:     30    ← forces a transcript mid-monologue so results keep 
 │   │   └── test-batch-audio.ts, test-batch-proxy.ts   # Offline tests (no Gnani calls)
 │   ├── main.tsx
 │   └── index.css
-├── .env                        # GNANI_API_KEY (git-ignored)
+├── .env                        # GNANI_API_KEY + GEMINI_API_KEY (git-ignored)
 └── .env.example
 ```
 
@@ -223,6 +266,7 @@ x-max-speech-s:     30    ← forces a transcript mid-monologue so results keep 
 | `GET /api/stt/batch/diarize/:jobId/files` | Completed files + `transcript_url`s |
 | `POST /api/stt/batch/diarize/:jobId/cancel` | Cancel the Gnani job |
 | `GET /api/stt/batch/diarize/download?url=…` | Proxies the presigned `transcript_url` and returns segment JSON |
+| `POST /api/ai/analyze` | One Gemini call: English translation + structured clinical summary (server-side key) |
 
 Realtime WS accepts only exact **1,024-byte binary** frames and `{"type":"commit"}` text frames; batch WS sessions also emit `{"type":"batch_ack","frames":N}` for the client's in-flight window. Everything else is dropped and logged.
 
@@ -281,6 +325,9 @@ Useful for verifying the shared plumbing (resampler, framing, pacing, flow contr
 | Variable | Default | Description |
 | --- | --- | --- |
 | `GNANI_API_KEY` | — | **Required.** Gnani API key; verified at boot, server-side only |
+| `GEMINI_API_KEY` | — | Google AI Studio API key for translation + summary. Optional: without it transcription still works and the AI cards show a configuration error |
+| `GEMINI_MODEL` | `gemini-2.5-flash` | Gemini model id used by `/api/ai/analyze` |
+| `GEMINI_BASE_URL` | `https://generativelanguage.googleapis.com` | Override the Gemini REST host (proxy/self-hosted gateway) |
 | `PORT` | `8787` | Server port |
 | `HOST` | `0.0.0.0` | Bind address |
 | `MAX_SESSIONS_PER_IP` | `2` | Concurrent realtime Gnani streams per client IP |
@@ -294,6 +341,10 @@ Useful for verifying the shared plumbing (resampler, framing, pacing, flow contr
 | Symptom | Cause & fix |
 | --- | --- |
 | "Microphone access was blocked" / prompt never appears | Allow mic access in site settings; use `localhost` or HTTPS. Reload. |
+| AI cards show “GEMINI_API_KEY is not configured” | Add `GEMINI_API_KEY=…` to `.env` and restart the API. Get a key at https://aistudio.google.com/apikey. |
+| “Gemini rate limit reached … 1,500 requests per day” | Free-tier daily quota is exhausted for that key. Wait for the reset or use another key/project. One request is sent per completed transcript. |
+| “Gemini blocked the request” | Safety filter on the model side; try a different recording or review the content. |
+| AI cards stop at “Translating and summarising…” | Check the API log for `Gemini analysis failed`; the UI shows the reason and a Retry button. Long sessions may exceed output limits — split the recording. |
 | `401` / "API credentials rejected" | `GNANI_API_KEY` missing/invalid — check `.env`, restart. |
 | `502` "Gnani batch… (400 INVALID_CONFIG) unsupported format" | Mixed-extension file; **rare now** — the server sniffs the magic bytes and renames before upload. If you still see it, the container is genuinely unusable by Gnani: re-encode to WAV/MP3. |
 | `429 RATE_LIMITED` | Normal burst limiting. The server retries automatically (watch for `Gnani rate limited; retrying` logs). If it persists after 4 attempts, wait ~1 min and click Generate again. |
@@ -317,10 +368,11 @@ Server logs include session ids, frame counts, upstream close codes, rate-limit 
 
 ## Security & privacy
 
-- **Key isolation:** `GNANI_API_KEY` is read from `.env` and attached **only** by the Node server. It never appears in the frontend bundle, browser dev-tools, or logs.
+- **Key isolation:** `GNANI_API_KEY` and `GEMINI_API_KEY` are read from `.env` and attached **only** by the Node server. They never appear in the frontend bundle, browser dev-tools, or logs.
 - **Realtime:** raw 16 kHz PCM is relayed in memory only — nothing written to disk, nothing stored.
 - **Live recording:** the captured PCM lives in browser memory, is encoded to MP3 on Stop, and is discarded when the session is reset or the tab closes.
 - **Batch:** the uploaded file (including the auto-uploaded live session) lives in the server process memory (multer memory storage) only long enough to forward it to Gnani; transcripts are fetched, shaped, and discarded — never written to disk.
+- **AI analysis:** only the diarized **text** (speaker labels + timestamps) is sent to Gemini, once per transcript. Audio never reaches Gemini, and nothing is stored by the server.
 - **Auth to Gnani / to browser:** the browser only ever talks to *your* server; jobs are keyed only by knowledge of that API surface.
 - **Transcript lifetime:** transcripts live in the tab's memory; clear or close the tab and they're gone.
 - **Exposure:** intended for local/private deployment. If you expose it publicly: terminate TLS, add your own auth + rate limiting in front, and keep the Gnani key server-side.
@@ -331,10 +383,11 @@ Server logs include session ids, frame counts, upstream close codes, rate-limit 
 
 - **Realtime diarization doesn't exist at Gnani** — diarization is a Gnani Batch Jobs API feature only. Live recording still streams the plain realtime transcript, and on **Stop** the captured session is sent through the batch path automatically so you get the diarized text too.
 - Live-session diarization is skipped when the session captured no speech.
-- A live session longer than ~40 minutes at 32 kbps can exceed the 10 MB batch cap; the live transcript is unaffected, but speaker separation will fail for that session.
+- **AI output needs human review.** Gemini corrects likely misheard medicine names and flags implausible ones, but it can still be wrong — always verify prescriptions and doses with a clinician/pharmacist. The 1,500 requests/day free tier is per Google API key.
+- A live session longer than ~40 minutes at 32 kbps can exceed the 10 MB batch cap; the live transcript is unaffected, but speaker separation (and therefore the AI translation/summary) will fail for that session.
 - Batch direct upload is capped at **10 MB**; files needing more require Gnani's presigned-upload flow (not implemented).
 - The legacy local-decode WebSocket batch path still exists (code + tests) but is not wired into the UI; the active batch path is the REST jobs flow above.
-- No translation, no user accounts/auth, no persisted history.
+- No user accounts/auth, no persisted history.
 - Language detection is automatic (`indic-auto`); realtime shows it per utterance, batch per segment (`language_detected`).
 - Poll-based progress is coarse (job-level counters, not audio-level seek bars).
 

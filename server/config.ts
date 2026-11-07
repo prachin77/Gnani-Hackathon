@@ -33,6 +33,16 @@ export const config = {
     maxSpeechSec: 30,
   },
 
+  /** Gemini is optional: without a key the app still transcribes, it just
+   * cannot translate or summarise. */
+  gemini: {
+    baseUrl: process.env.GEMINI_BASE_URL ?? "https://generativelanguage.googleapis.com",
+    apiKey: (process.env.GEMINI_API_KEY ?? "").trim(),
+    model: (process.env.GEMINI_MODEL ?? "gemini-2.5-flash").trim(),
+    /** Free tier is about 1,500 requests/day; we send exactly one per transcript. */
+    dailyLimit: intFromEnv("GEMINI_DAILY_LIMIT", 1500),
+  },
+
   limits: {
     /** Concurrent Gnani streams allowed per client IP. */
     sessionsPerIp: intFromEnv("MAX_SESSIONS_PER_IP", 2),

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { AnalysisPanel } from "./components/AnalysisPanel";
 import { BatchPanel } from "./components/BatchPanel";
 import { ErrorBanner } from "./components/ErrorBanner";
 import { Header } from "./components/Header";
@@ -11,6 +12,7 @@ import {
   useAudioStreaming,
 } from "./hooks/useAudioStreaming";
 import { useBatchDiarization } from "./hooks/useBatchDiarization";
+import { useTranscriptAnalysis } from "./hooks/useTranscriptAnalysis";
 
 type DiarizeSource = "upload" | "live" | null;
 
@@ -25,6 +27,8 @@ const DIARIZE_BUSY_STATES: string[] = [
 export default function App() {
   const audio = useAudioStreaming();
   const diarize = useBatchDiarization();
+  const analysis = useTranscriptAnalysis();
+  const runAnalysis = analysis.analyze;
 
   /** Where the audio currently being diarized came from. */
   const [diarizeSource, setDiarizeSource] = useState<DiarizeSource>(null);
@@ -79,6 +83,13 @@ export default function App() {
     }
   }, [audio.state]);
 
+  // Once the diarized transcript is ready (live or upload), translate + summarise
+  // it with Gemini. Exactly one request per transcript.
+  useEffect(() => {
+    if (diarize.state !== "complete" || diarize.segments.length === 0) return;
+    void runAnalysis(diarize.segments, liveSource ? "live" : "upload");
+  }, [diarize.state, diarize.segments, liveSource, runAnalysis]);
+
   const transcriptProcessing = DIARIZE_BUSY_STATES.includes(diarize.state);
 
   const batchEmpty =
@@ -100,31 +111,40 @@ export default function App() {
 
   const handleFile = (file: File) => {
     liveDiarizeStartedRef.current = true; // Uploads must never trigger live logic.
+    analysis.reset();
     setDiarizeSource("upload");
     void diarize.select(file);
   };
 
   const closeDiarization = () => {
     diarize.reset();
+    analysis.reset();
     setDiarizeSource(null);
   };
 
   const handleCancelDiarization = () => {
     diarize.cancel();
+    analysis.reset();
     setDiarizeSource(null);
   };
 
   const handleNewSession = () => {
     liveDiarizeStartedRef.current = false;
     if (liveSource) diarize.reset();
+    analysis.reset();
     setDiarizeSource(null);
     void audio.prepare();
   };
 
   const handleDone = () => {
     if (liveSource) diarize.reset();
+    analysis.reset();
     setDiarizeSource(null);
     audio.reset();
+  };
+
+  const retryAnalysis = () => {
+    void runAnalysis(diarize.segments, liveSource ? "live" : "upload", true);
   };
 
   return (
@@ -217,6 +237,16 @@ export default function App() {
           {liveSource ? (
             <>
               <LiveTranscription
+                title="Live transcript (raw)"
+                segments={audio.segments}
+                isProcessing={audio.isProcessing}
+                state={audio.state}
+                onClear={audio.clearTranscript}
+                mode="live"
+                footerNote="Exactly what streamed live during the recording, without speaker separation."
+                downloadFilename="live-transcript.txt"
+              />
+              <LiveTranscription
                 title="Diarized transcript (speakers)"
                 segments={diarize.segments}
                 isProcessing={transcriptProcessing}
@@ -225,27 +255,48 @@ export default function App() {
                 mode="batch"
                 emptyTitle={batchEmpty?.title}
                 emptyDescription={batchEmpty?.description}
-                footerNote="Speaker-separated transcript of the recorded session — use this one for translation and summary."
+                footerNote="Speaker-separated transcript of the recorded session — the canonical source for translation and summary."
+                downloadFilename="diarized-transcript.txt"
               />
+              <AnalysisPanel
+                state={analysis.state}
+                analysis={analysis.analysis}
+                error={analysis.error}
+                model={analysis.model}
+                source="live"
+                onRetry={retryAnalysis}
+              />
+            </>
+          ) : batchActive ? (
+            <>
               <LiveTranscription
-                title="Live transcript (raw)"
-                segments={audio.segments}
-                isProcessing={audio.isProcessing}
-                state={audio.state}
-                onClear={audio.clearTranscript}
-                mode="live"
-                footerNote="Exactly what streamed live during the recording, without speaker separation."
+                title="Diarized transcript (speakers)"
+                segments={diarize.segments}
+                isProcessing={transcriptProcessing}
+                state="idle"
+                onClear={diarize.reset}
+                mode="batch"
+                emptyTitle={batchEmpty?.title}
+                emptyDescription={batchEmpty?.description}
+                footerNote="Speaker-separated transcript of the uploaded file — the canonical source for translation and summary."
+                downloadFilename="diarized-transcript.txt"
+              />
+              <AnalysisPanel
+                state={analysis.state}
+                analysis={analysis.analysis}
+                error={analysis.error}
+                model={analysis.model}
+                source="upload"
+                onRetry={retryAnalysis}
               />
             </>
           ) : (
             <LiveTranscription
-              segments={batchActive ? diarize.segments : audio.segments}
-              isProcessing={batchActive ? transcriptProcessing : audio.isProcessing}
-              state={batchActive ? "idle" : audio.state}
-              onClear={batchActive ? diarize.reset : audio.clearTranscript}
-              mode={batchActive ? "batch" : "live"}
-              emptyTitle={batchActive ? batchEmpty?.title : undefined}
-              emptyDescription={batchActive ? batchEmpty?.description : undefined}
+              segments={audio.segments}
+              isProcessing={audio.isProcessing}
+              state={audio.state}
+              onClear={audio.clearTranscript}
+              mode="live"
             />
           )}
         </div>

@@ -3,11 +3,14 @@ import {
   ArrowDown,
   Check,
   Copy,
+  Download,
   Loader2,
   ScrollText,
   Trash2,
 } from "lucide-react";
 import type { SessionState, TranscriptSegment } from "../hooks/useAudioStreaming";
+import { transcriptToText } from "../lib/analysis";
+import { downloadText } from "../lib/download";
 import { formatTimestamp } from "../lib/format";
 
 interface LiveTranscriptionProps {
@@ -22,6 +25,8 @@ interface LiveTranscriptionProps {
   title?: string;
   /** Overrides the footer note on the left. */
   footerNote?: string;
+  /** When set, shows a Download button that saves the transcript as .txt. */
+  downloadFilename?: string;
 }
 
 function transcriptText(segments: TranscriptSegment[]): string {
@@ -64,6 +69,7 @@ export function LiveTranscription({
   emptyDescription,
   title,
   footerNote,
+  downloadFilename,
 }: LiveTranscriptionProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const previousCountRef = useRef(segments.length);
@@ -153,6 +159,19 @@ export function LiveTranscription({
         </div>
 
         <div className="flex items-center gap-1">
+          {downloadFilename && (
+            <button
+              type="button"
+              onClick={() => downloadText(downloadFilename, transcriptToText(segments))}
+              disabled={!hasSegments}
+              aria-label="Download transcript"
+              className="inline-flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-[11px] font-medium text-slate-500 transition-colors hover:bg-slate-50 hover:text-slate-800 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              <Download className="h-3.5 w-3.5" aria-hidden="true" />
+              <span className="hidden sm:inline">Download</span>
+            </button>
+          )}
+
           <button
             type="button"
             onClick={handleCopy}
