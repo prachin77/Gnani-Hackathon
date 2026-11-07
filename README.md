@@ -94,10 +94,17 @@ Once the **diarized** transcript is ready — for a live session *and* for an up
 
 The prompt is tuned for Indian clinical conversations:
 
-- **Medication-name repair** using Indian brand/generic knowledge — e.g. “AC lock” → **Aciloc (ranitidine)**, “dolocitamol” → likely **Paracetamol**, “montek lc” → **Montek LC**. Corrections require strong phonetic evidence; otherwise the spoken form is kept.
-- **Medication flags** when a name looks like a corrupted *different* drug or is implausible (`misheardName`, `unknownMedicine`, `wrongDose`, `duplicateTherapy`, `allergyRisk`), with a severity and a one-line explanation.
-- **No invention:** doses, frequencies, durations and tests are only recorded when actually said; everything else is `null`/empty.
-- Any mentioned test/report (CBC, HbA1c, X-ray, ultrasound, …) is listed under **Suggested reports**.
+- **Medication-name handling:** real phonetic variants of known Indian drugs may be
+  corrected (e.g. “aciloc” → **Aciloc**, “montek lc” → **Montek LC**). Names that
+  don't match any real medicine (e.g. “dolocitamol”) are kept as heard and **flagged**
+  under Medication flags — never silently rewritten to a guess.
+- **Medication flags** when a name looks corrupted or implausible
+  (`misheardName`, `unknownMedicine`, `wrongDose`, `duplicateTherapy`,
+  `allergyRisk`), with a severity and a one-line explanation.
+- **No invention:** doses, frequencies, durations and tests are only recorded when
+  actually said; everything else is `null`/empty.
+- Any mentioned test/report (CBC, HbA1c, X-ray, ultrasound, …) is listed under
+  **Suggested reports**.
 
 Each artifact is downloadable:
 
@@ -383,7 +390,10 @@ Server logs include session ids, frame counts, upstream close codes, rate-limit 
 
 - **Realtime diarization doesn't exist at Gnani** — diarization is a Gnani Batch Jobs API feature only. Live recording still streams the plain realtime transcript, and on **Stop** the captured session is sent through the batch path automatically so you get the diarized text too.
 - Live-session diarization is skipped when the session captured no speech.
-- **AI output needs human review.** Gemini corrects likely misheard medicine names and flags implausible ones, but it can still be wrong — always verify prescriptions and doses with a clinician/pharmacist. The 1,500 requests/day free tier is per Google API key.
+- **AI output needs human review.** Gemini corrects real phonetic drug variants when
+  confident, but flags anything unverifiable (e.g. “dolocitamol”) instead of guessing.
+  Always verify prescriptions and doses with a clinician/pharmacist. The 1,500
+  requests/day free tier is per Google API key.
 - A live session longer than ~40 minutes at 32 kbps can exceed the 10 MB batch cap; the live transcript is unaffected, but speaker separation (and therefore the AI translation/summary) will fail for that session.
 - Batch direct upload is capped at **10 MB**; files needing more require Gnani's presigned-upload flow (not implemented).
 - The legacy local-decode WebSocket batch path still exists (code + tests) but is not wired into the UI; the active batch path is the REST jobs flow above.
