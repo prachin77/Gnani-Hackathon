@@ -60,7 +60,7 @@ Open **http://localhost:8787** — Express serves the built frontend and hosts b
 - Live waveform, recording timer, speech/processing indicators, connection status.
 - While recording, the **exact 16 kHz PCM** that is streamed to Gnani is also kept in memory, so the clip used for diarization is the same audio that produced the live transcript.
 - On **Stop**, that PCM is encoded to **MP3** (16 kHz mono, 32 kbps). MP3 carries real duration metadata; `MediaRecorder`'s live WebM does not, and Gnani rejects such files with `file reports no usable duration ("")`.
-- The stopped card offers **Download recording (MP3)** so you can verify the exact file the batch API receives.
+- Once encoding finishes, the stopped card offers **Download recording** so you can play the exact file the batch API receives. If MP3 encoding is unavailable, the app transparently uploads a WAV built from the same PCM and the link/download name say `.wav`.
 - **Stop** finalizes gracefully: trailing silence → `commit` → wait for the last transcript → close, so the final sentence is never lost.
 
 #### What happens on Stop (automatic)
@@ -191,7 +191,7 @@ x-max-speech-s:     30    ← forces a transcript mid-monologue so results keep 
 │   │   └── useBatchProcessing.ts   # Legacy local-decode WS batch (unused by UI, kept for tests)
 │   ├── lib/
 │   │   ├── pcm.ts                 # Resampler, frame emitter, WS URL builder
-│   │   ├── encode.ts              # 16 kHz mono PCM → MP3 (lamejs)
+│   │   ├── encode.ts              # 16 kHz mono PCM → MP3 (@breezystack/lamejs) / WAV fallback
 │   │   ├── batch.ts               # File validation, decode, downmix, resample (legacy path)
 │   │   └── languages.ts, format.ts, errors.ts
 │   ├── public/
@@ -302,6 +302,7 @@ Useful for verifying the shared plumbing (resampler, framing, pacing, flow contr
 | 422 "invalid character … `download`" | Should not occur (routes ordered correctly); means an old build is cached — rebuild (`npm run build`). |
 | "This file is larger than 10 MB" | Batch direct upload is capped at 10 MB. Compress to MP3/OGG, trim, or split the recording. |
 | "file reports no usable duration" | Can only come from an old/cached build that still uploads `MediaRecorder` WebM. The current build uploads `live-session.mp3` encoded from the streamed PCM, which always has a duration. Hard-reload the page (`Ctrl+Shift+R`). |
+| Stopped card says "Encoding the session audio…" and no download appears | The browser encoder failed or hung. The app now prints the error in red under the buttons and uploads a WAV fallback automatically. Send that message if it persists. |
 | Batch ends with `FAILED` / `START_FAILED` | You now see Gnani's per-file reason in the UI (e.g. `Empty transcript after 3 retries`), and it is logged as `Gnani batch job files failed` on the server. Silent/tone-only audio fails this way; re-record with audible speech. |
 | Batch finishes with "No speech detected" | Processed fully but no utterances found — verify the file contains audible speech. |
 | "Too many active recording sessions" | Realtime per-IP cap (`MAX_SESSIONS_PER_IP`, default 2). Stop another tab or wait a few seconds. |

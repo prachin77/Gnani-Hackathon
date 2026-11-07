@@ -15,7 +15,7 @@ import {
   friendlySocketClose,
   isFatalServerError,
 } from "../lib/errors";
-import { encodeMp3 } from "../lib/encode";
+import { encodeMp3, encodeWav } from "../lib/encode";
 
 export type SessionState =
   | "idle"
@@ -28,6 +28,25 @@ export type SessionState =
   | "error";
 
 export type ConnectionState = "idle" | "connecting" | "connected" | "error";
+
+/** Encodes MP3 in the browser, but never lets a hung encoder block the flow. */
+const MP3_ENCODE_TIMEOUT_MS = 30_000;
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = window.setTimeout(() => reject(new Error(label)), ms);
+    promise.then(
+      (value) => {
+        window.clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        window.clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
 
 export interface RecordedSession {
   blob: Blob;
@@ -130,6 +149,7 @@ export function useAudioStreaming() {
   const [analyser, setAnalyser] = useState<AnalyserNode | null>(null);
   const [sessionSegments, setSessionSegments] = useState(0);
   const [lastRecording, setLastRecording] = useState<RecordedSession | null>(null);
+  const [recordingError, setRecordingError] = useState<string | null>(null);
   const stateRef = useRef<SessionState>("idle");
   const wsRef = useRef<WebSocket | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
@@ -226,31 +246,53 @@ export function useAudioStreaming() {
    */
   const finalizeRecording = useCallback(
     (chunks: ArrayBuffer[], sampleCount: number, recordingId: number) => {
-      if (chunks.length === 0 || sampleCount === 0) return;
+      if (chunks.length === 0 || sampleCount === 0) {
+        setRecordingError("No audio was captured for this session.");
+        return;
+      }
 
       void (async () => {
-        try {
-          const pcm = new Int16Array(sampleCount);
-          let offset = 0;
-          for (const chunk of chunks) {
-            const samples = new Int16Array(chunk);
-            pcm.set(samples, offset);
-            offset += samples.length;
-          }
-
-          const blob = await encodeMp3(pcm, TARGET_SAMPLE_RATE, 32);
-
-          // A new session may have started (or been reset) while encoding.
-          if (recordingIdRef.current !== recordingId) return;
-
-          setLastRecording({
-            blob,
-            mimeType: "audio/mpeg",
-            durationMs: Math.round((sampleCount / TARGET_SAMPLE_RATE) * 1000),
-          });
-        } catch (encodeError) {
-          console.warn("[recorder] could not encode the live session to MP3", encodeError);
+        const pcm = new Int16Array(sampleCount);
+        let offset = 0;
+        for (const chunk of chunks) {
+          const samples = new Int16Array(chunk);
+          pcm.set(samples, offset);
+          offset += samples.length;
         }
+
+        const durationMs = Math.round((sampleCount / TARGET_SAMPLE_RATE) * 1000);
+        let recording: RecordedSession;
+        let problem: string | null = null;
+
+        try {
+          const blob = await withTimeout(
+            encodeMp3(pcm, TARGET_SAMPLE_RATE, 32),
+            MP3_ENCODE_TIMEOUT_MS,
+            "MP3 encoding timed out",
+          );
+          recording = { blob, mimeType: "audio/mpeg", durationMs };
+        } catch (mp3Error) {
+          console.warn("[recorder] MP3 encoding failed; falling back to WAV", mp3Error);
+          problem = mp3Error instanceof Error ? mp3Error.message : String(mp3Error);
+          try {
+            const blob = encodeWav(pcm, TARGET_SAMPLE_RATE);
+            recording = { blob, mimeType: "audio/wav", durationMs };
+          } catch (wavError) {
+            console.warn("[recorder] WAV encoding failed too", wavError);
+            if (recordingIdRef.current === recordingId) {
+              setRecordingError("Could not encode the session audio for the batch API.");
+            }
+            return;
+          }
+        }
+
+        // A new session may have started (or been reset) while encoding.
+        if (recordingIdRef.current !== recordingId) return;
+
+        setRecordingError(
+          problem ? `MP3 encoding failed (${problem}); WAV uploaded instead.` : null,
+        );
+        setLastRecording(recording);
       })();
     },
     [],
@@ -578,6 +620,7 @@ export function useAudioStreaming() {
     pcmChunksRef.current = [];
     pcmSampleCountRef.current = 0;
     setLastRecording(null);
+    setRecordingError(null);
     updatePhase("requesting");
 
     try {
@@ -788,6 +831,7 @@ export function useAudioStreaming() {
     pcmChunksRef.current = [];
     pcmSampleCountRef.current = 0;
     setLastRecording(null);
+    setRecordingError(null);
     updatePhase("idle");
   }, [disposeAudio, updatePhase]);
 
@@ -838,6 +882,7 @@ export function useAudioStreaming() {
     analyser,
     sessionSegments,
     lastRecording,
+    recordingError,
     prepare,
     start,
     stop,

@@ -20,6 +20,8 @@ interface RecordingPanelProps {
   isProcessing: boolean;
   sessionSegments: number;
   recordingUrl: string | null;
+  recordingFilename: string;
+  recordingError: string | null;
   onStart: () => void;
   onStop: () => void;
   onNewSession: () => void;
@@ -46,6 +48,8 @@ export function RecordingPanel({
   isProcessing,
   sessionSegments,
   recordingUrl,
+  recordingFilename,
+  recordingError,
   onStart,
   onStop,
   onNewSession,
@@ -121,18 +125,24 @@ export function RecordingPanel({
           {recordingUrl && (
             <a
               href={recordingUrl}
-              download="live-session.mp3"
+              download={recordingFilename}
               className="mt-4 inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-xs font-medium text-slate-600 transition-colors hover:bg-slate-50 hover:text-slate-800 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600"
             >
               <Download className="h-3.5 w-3.5" aria-hidden="true" />
-              Download recording (MP3)
+              Download recording ({recordingFilename.split(".").pop()?.toUpperCase()})
             </a>
           )}
-          {(recordingUrl || sessionSegments > 0) && (
-            <p className="mt-2 text-[11px] text-slate-400">
-              {recordingUrl
-                ? "This exact MP3 is what the batch API receives — play it to check the audio."
-                : "Encoding the session audio to MP3 for the batch API…"}
+          {(recordingUrl || recordingError || sessionSegments > 0) && (
+            <p
+              className={`mt-2 max-w-md text-[11px] ${
+                recordingError ? "text-rose-600" : "text-slate-400"
+              }`}
+            >
+              {recordingError
+                ? recordingError
+                : recordingUrl
+                  ? "This exact audio file is what the batch API receives — play it to check it was recorded."
+                  : "Encoding the session audio for the batch API…"}
             </p>
           )}
         </div>

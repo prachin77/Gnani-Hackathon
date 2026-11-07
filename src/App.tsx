@@ -170,6 +170,12 @@ export default function App() {
               isProcessing={audio.isProcessing}
               sessionSegments={audio.sessionSegments}
               recordingUrl={recordingUrl}
+              recordingFilename={
+                audio.lastRecording
+                  ? `live-session${extensionForRecordingMime(audio.lastRecording.mimeType)}`
+                  : "live-session.mp3"
+              }
+              recordingError={audio.recordingError}
               onStart={audio.start}
               onStop={() => void audio.stop()}
               onNewSession={handleNewSession}
