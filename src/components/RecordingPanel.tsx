@@ -1,5 +1,6 @@
 import {
   Check,
+  Download,
   ListChecks,
   Loader2,
   Mic,
@@ -18,6 +19,7 @@ interface RecordingPanelProps {
   speechActive: boolean;
   isProcessing: boolean;
   sessionSegments: number;
+  recordingUrl: string | null;
   onStart: () => void;
   onStop: () => void;
   onNewSession: () => void;
@@ -43,6 +45,7 @@ export function RecordingPanel({
   speechActive,
   isProcessing,
   sessionSegments,
+  recordingUrl,
   onStart,
   onStop,
   onNewSession,
@@ -114,6 +117,24 @@ export function RecordingPanel({
               Done
             </button>
           </div>
+
+          {recordingUrl && (
+            <a
+              href={recordingUrl}
+              download="live-session.mp3"
+              className="mt-4 inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-xs font-medium text-slate-600 transition-colors hover:bg-slate-50 hover:text-slate-800 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600"
+            >
+              <Download className="h-3.5 w-3.5" aria-hidden="true" />
+              Download recording (MP3)
+            </a>
+          )}
+          {(recordingUrl || sessionSegments > 0) && (
+            <p className="mt-2 text-[11px] text-slate-400">
+              {recordingUrl
+                ? "This exact MP3 is what the batch API receives — play it to check the audio."
+                : "Encoding the session audio to MP3 for the batch API…"}
+            </p>
+          )}
         </div>
       </section>
     );

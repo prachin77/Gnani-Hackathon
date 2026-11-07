@@ -28,8 +28,21 @@ export default function App() {
 
   /** Where the audio currently being diarized came from. */
   const [diarizeSource, setDiarizeSource] = useState<DiarizeSource>(null);
+  /** Object URL for the MP3 of the last live session (user verification). */
+  const [recordingUrl, setRecordingUrl] = useState<string | null>(null);
   /** Guards the auto-diarization so a live session only triggers it once. */
   const liveDiarizeStartedRef = useRef(false);
+
+  useEffect(() => {
+    const recording = audio.lastRecording;
+    if (!recording) {
+      setRecordingUrl(null);
+      return;
+    }
+    const url = URL.createObjectURL(recording.blob);
+    setRecordingUrl(url);
+    return () => URL.revokeObjectURL(url);
+  }, [audio.lastRecording]);
 
   const liveSource = diarizeSource === "live";
   const batchActive = diarize.state !== "idle";
@@ -52,7 +65,7 @@ export default function App() {
 
     const extension = extensionForRecordingMime(recording.mimeType);
     const file = new File([recording.blob], `live-session${extension}`, {
-      type: recording.mimeType || "audio/webm",
+      type: recording.mimeType || "audio/mpeg",
     });
 
     setDiarizeSource("live");
@@ -156,6 +169,7 @@ export default function App() {
               speechActive={audio.speechActive}
               isProcessing={audio.isProcessing}
               sessionSegments={audio.sessionSegments}
+              recordingUrl={recordingUrl}
               onStart={audio.start}
               onStop={() => void audio.stop()}
               onNewSession={handleNewSession}

@@ -15,7 +15,7 @@ import {
   friendlySocketClose,
   isFatalServerError,
 } from "../lib/errors";
-import { convertRecordingToMp3 } from "../lib/encode";
+import { encodeMp3 } from "../lib/encode";
 
 export type SessionState =
   | "idle"
@@ -33,25 +33,6 @@ export interface RecordedSession {
   blob: Blob;
   mimeType: string;
   durationMs: number;
-}
-
-/** Picks the best compressed container the browser can record. */
-function pickRecorderMime(): string | null {
-  if (typeof MediaRecorder === "undefined") return null;
-  const candidates = [
-    "audio/webm;codecs=opus",
-    "audio/webm",
-    "audio/ogg;codecs=opus",
-    "audio/mp4",
-  ];
-  for (const candidate of candidates) {
-    try {
-      if (MediaRecorder.isTypeSupported(candidate)) return candidate;
-    } catch {
-      // isTypeSupported can throw in quirky browsers; just skip.
-    }
-  }
-  return null;
 }
 
 /** Maps a recorded MIME type to a file extension Gnani accepts. */
@@ -159,9 +140,8 @@ export function useAudioStreaming() {
   const workletRef = useRef<AudioWorkletNode | null>(null);
   const scriptProcessorRef = useRef<ScriptProcessorNode | null>(null);
   const frameEmitterRef = useRef<PcmFrameEmitter | null>(null);
-  const recorderRef = useRef<MediaRecorder | null>(null);
-  const recorderChunksRef = useRef<Blob[]>([]);
-  const recorderStartedAtRef = useRef<number | null>(null);
+  const pcmChunksRef = useRef<ArrayBuffer[]>([]);
+  const pcmSampleCountRef = useRef(0);
   const recordingIdRef = useRef(0);
 
   const recordingRef = useRef(false);
@@ -238,93 +218,46 @@ export function useAudioStreaming() {
     [resolveStopWaiter],
   );
 
-  const startRecorder = useCallback((stream: MediaStream) => {
-    const mimeType = pickRecorderMime();
-    // Without MediaRecorder support the live transcript still works; only the
-    // post-stop diarization is unavailable.
-    if (!mimeType) return;
+  /**
+   * Encodes the PCM frames captured from the realtime stream into an MP3.
+   * This is the exact audio that produced the live transcript, and MP3 has a
+   * real duration — unlike MediaRecorder's live WebM, which Gnani rejects
+   * with "file reports no usable duration".
+   */
+  const finalizeRecording = useCallback(
+    (chunks: ArrayBuffer[], sampleCount: number, recordingId: number) => {
+      if (chunks.length === 0 || sampleCount === 0) return;
 
-    try {
-      const recordingId = recordingIdRef.current + 1;
-      recordingIdRef.current = recordingId;
-
-      const recorder = new MediaRecorder(stream, {
-        mimeType,
-        audioBitsPerSecond: 32_000,
-      });
-      recorderChunksRef.current = [];
-      recorderStartedAtRef.current = Date.now();
-
-      recorder.ondataavailable = (event) => {
-        if (event.data && event.data.size > 0) recorderChunksRef.current.push(event.data);
-      };
-
-      recorder.onstop = () => {
-        const chunks = recorderChunksRef.current;
-        recorderChunksRef.current = [];
-        const startedAt = recorderStartedAtRef.current;
-        recorderStartedAtRef.current = null;
-        if (chunks.length === 0) return;
-
-        const type = recorder.mimeType || mimeType;
-        const raw = new Blob(chunks, { type });
-        const wallDurationMs = startedAt !== null ? Date.now() - startedAt : 0;
-
-        // MediaRecorder writes a live WebM stream with no duration metadata,
-        // which Gnani rejects ("file reports no usable duration"). Convert to
-        // MP3, which carries a real duration, before uploading.
-        void (async () => {
-          let recording: RecordedSession;
-          try {
-            const mp3 = await convertRecordingToMp3(raw);
-            recording = {
-              blob: mp3.blob,
-              mimeType: "audio/mpeg",
-              durationMs: mp3.durationMs || wallDurationMs,
-            };
-          } catch (conversionError) {
-            console.warn(
-              "[recorder] could not convert the session to MP3; uploading the raw recording",
-              conversionError,
-            );
-            recording = { blob: raw, mimeType: type, durationMs: wallDurationMs };
+      void (async () => {
+        try {
+          const pcm = new Int16Array(sampleCount);
+          let offset = 0;
+          for (const chunk of chunks) {
+            const samples = new Int16Array(chunk);
+            pcm.set(samples, offset);
+            offset += samples.length;
           }
 
-          // A new session may have started (or been reset) while converting.
+          const blob = await encodeMp3(pcm, TARGET_SAMPLE_RATE, 32);
+
+          // A new session may have started (or been reset) while encoding.
           if (recordingIdRef.current !== recordingId) return;
-          setLastRecording(recording);
-        })();
-      };
 
-      // Emit a chunk every second so a hard stop still keeps the audio.
-      recorder.start(1000);
-      recorderRef.current = recorder;
-    } catch (recorderError) {
-      console.warn("[recorder] could not record the live session", recorderError);
-    }
-  }, []);
-
-  const stopRecorder = useCallback(() => {
-    const recorder = recorderRef.current;
-    recorderRef.current = null;
-    if (!recorder) return;
-
-    try {
-      if (recorder.state !== "inactive") {
-        // onstop builds the blob and publishes `lastRecording`.
-        recorder.stop();
-        return;
-      }
-    } catch {
-      // fall through to cleanup
-    }
-    recorderStartedAtRef.current = null;
-    recorderChunksRef.current = [];
-  }, []);
+          setLastRecording({
+            blob,
+            mimeType: "audio/mpeg",
+            durationMs: Math.round((sampleCount / TARGET_SAMPLE_RATE) * 1000),
+          });
+        } catch (encodeError) {
+          console.warn("[recorder] could not encode the live session to MP3", encodeError);
+        }
+      })();
+    },
+    [],
+  );
 
   const disposeAudio = useCallback(() => {
     recordingRef.current = false;
-    stopRecorder();
 
     try {
       workletRef.current?.port.postMessage({ type: "stop" });
@@ -360,7 +293,7 @@ export function useAudioStreaming() {
     }
 
     setAnalyser(null);
-  }, [stopRecorder]);
+  }, []);
 
   const finishStop = useCallback(() => {
     stopDurationTimer(true);
@@ -543,6 +476,11 @@ export function useAudioStreaming() {
         if (!ws || ws.readyState !== WebSocket.OPEN) return;
         if (ws.bufferedAmount > MAX_SOCKET_BUFFER_BYTES) return;
 
+        // Keep the exact PCM that is transcribed so the session can be
+        // re-uploaded to the batch diarization API on Stop.
+        pcmChunksRef.current.push(buffer);
+        pcmSampleCountRef.current += buffer.byteLength / 2;
+
         try {
           ws.send(buffer);
         } catch {
@@ -637,6 +575,8 @@ export function useAudioStreaming() {
     commitSentRef.current = false;
     closingRef.current = false;
     recordingIdRef.current += 1;
+    pcmChunksRef.current = [];
+    pcmSampleCountRef.current = 0;
     setLastRecording(null);
     updatePhase("requesting");
 
@@ -694,9 +634,9 @@ export function useAudioStreaming() {
     setConnection("connecting");
     updatePhase("connecting");
 
-    if (mediaStreamRef.current) {
-      startRecorder(mediaStreamRef.current);
-    }
+    recordingIdRef.current += 1;
+    pcmChunksRef.current = [];
+    pcmSampleCountRef.current = 0;
 
     const ws = (() => {
       try {
@@ -764,7 +704,7 @@ export function useAudioStreaming() {
 
       fail(friendlySocketClose(event.code));
     };
-  }, [clearConnectTimer, fail, finishStop, handleFrame, resolveStopWaiter, startRecorder, updatePhase]);
+  }, [clearConnectTimer, fail, finishStop, handleFrame, resolveStopWaiter, updatePhase]);
 
   const stop = useCallback(async () => {
     const phase = stateRef.current;
@@ -775,6 +715,16 @@ export function useAudioStreaming() {
     setSpeechActive(false);
     recordingRef.current = false;
     stopDurationTimer(true);
+
+    // Encode the exact PCM that was streamed (and transcribed) into an MP3.
+    // Snapshotted before disposeAudio so the batch diarization always gets the
+    // whole session, whatever ends the stop early.
+    const recordedChunks = pcmChunksRef.current;
+    const recordedSamples = pcmSampleCountRef.current;
+    pcmChunksRef.current = [];
+    pcmSampleCountRef.current = 0;
+    finalizeRecording(recordedChunks, recordedSamples, recordingIdRef.current);
+
     disposeAudio();
 
     const ws = wsRef.current;
@@ -812,6 +762,7 @@ export function useAudioStreaming() {
     finishStop();
   }, [
     disposeAudio,
+    finalizeRecording,
     finishStop,
     resolveStopWaiter,
     scheduleFinalSettle,
@@ -834,6 +785,8 @@ export function useAudioStreaming() {
     setIsProcessing(false);
     setElapsedMs(0);
     recordingIdRef.current += 1;
+    pcmChunksRef.current = [];
+    pcmSampleCountRef.current = 0;
     setLastRecording(null);
     updatePhase("idle");
   }, [disposeAudio, updatePhase]);
