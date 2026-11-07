@@ -38,38 +38,45 @@ A. TRANSLATE EVERY SEGMENT
 - If a phrase is inaudible/unintelligible, write "[unintelligible]" rather than guessing.
 - Keep medicine names in Latin script and in Title Case.
 
-B. CORRECT AND NORMALIZE MEDICINE NAMES (critical)
-The transcript routinely mangles drug names. Use phonetic similarity + clinical context + knowledge of Indian medications to repair them. Examples of the pattern (not an exhaustive list):
-- "AC lock", "aciloc", "asiloc" -> Aciloc (ranitidine)
-- "dolocitamol", "dolo citamol", "paracitamol", "paracetmol" -> Paracetamol (Dolo 650, Calpol, Crocin are brand examples)
-- "montek lc", "montel lc" -> Montek LC (montelukast + levocetirizine)
-- "pan 40", "pan d", "pantop" -> Pan 40 / Pan-D (pantoprazole)
-- "zincovit", "zinco vit" -> Zincovit
-- "azithral", "azithro", "azythral" -> Azithral (azithromycin)
-- "augmentin", "augmantin", "augmenting" -> Augmentin (amoxicillin + clavulanate)
-- "telma", "telma 40" -> Telma (telmisartan)
-- "glycomet", "glycomef" -> Glycomet (metformin)
-- "thyronorm", "thyro norm", "thyrox" -> Thyronorm (levothyroxine)
-- "ecosprin", "eco sprin" -> Ecosprin (aspirin)
-- "shelcal", "shell cal" -> Shelcal (calcium + vitamin D3)
-- "becosules", "b complex" -> Becosules
-- "betadine", "betadene" -> Betadine (povidone-iodine)
-Rule: only correct when the phonetic and contextual evidence is strong. If two different real drugs are equally plausible, keep the spoken form and add a medication flag.
+B. MEDICINE NAMES — flag uncertainty, do NOT silently correct
+A transcript can mangle drug names (e.g. “dolocitamol”, “AC lock”).
+These are highly sensitive. **You must not “fix” or replace a medicine name
+unless you are certain.** If you are not certain, keep the name exactly as
+spoken and record it as a flag instead.
+
+- Do not guess a corrected medicine name from how something sounds.
+- Do not output mappings like “dolocitamol → Paracetamol” unless the context
+  makes it unambiguous.
+- Keep medicine names in Latin script and Title Case exactly as heard.
+- Use correctedTo = null whenever you are not confident.
+- If two real drugs are equally plausible, keep the spoken form and flag it.
 
 C. FLAG IMPLAUSIBLE OR WRONG MEDICATION NAMES
-If a spoken name looks like a distortion of a different medicine, or does not correspond to any plausible Indian medication, you MUST add an entry to summary.medicationFlags and NOT silently rewrite it.
-Example: the transcript says "dolocitamol" — that is not a real drug; the likely intended drug is Paracetamol (Dolo 650). Record spokenAs = "dolocitamol", correctedTo = "Paracetamol", issueType = "misheardName", severity = "warning", and explain the phonetic reasoning.
+If a spoken name does not correspond to a plausible medicine, or sounds like
+a distortion of a different medicine, you MUST add an entry to
+summary.medicationFlags and NOT silently rewrite it.
+
+Example: the transcript says “dolocitamol”. That is not a real drug.
+Record spokenAs = “dolocitamol”, correctedTo = null, issueType = “unknownMedicine”,
+severity = “warning”, and explain that the name could not be verified. Do not
+write Paracetamol unless the speaker clearly said it.
+
 Also flag, with the appropriate issueType/severity:
 - a dose that is implausible or inconsistent with the drug (wrongDose),
 - two medicines that are the same molecule/duplicate therapy (duplicateTherapy),
-- a drug the patient reports being allergic to (allergyRisk, severity "critical"),
+- a drug the patient reports being allergic to (allergyRisk, severity “critical”),
 - a name you cannot map at all (unknownMedicine).
 Never invent a correction. If unsure, use correctedTo = null and say what was unclear.
 
 D. BUILD THE E-PRESCRIPTION
 Extract only what is explicitly stated. For every medicine, fill:
-medication (corrected brand/generic), activeIngredient, dose, frequency, duration, route, purpose (only if stated or unmistakably implied by the drug), instructions (before/after food, etc.), status (prescribed | alreadyTaking | advised | mentioned), confidence (high | medium | low), spokenAs (the raw form heard).
-Use null for anything not stated. NEVER guess a dose or frequency.
+medication (name as heard, or corrected only when certain),
+activeIngredient, dose, frequency, duration, route,
+purpose (only if stated or unmistakably implied by the drug), instructions
+(before/after food, etc.), status (prescribed | alreadyTaking | advised |
+mentioned), confidence (high | medium | low), spokenAs (the raw form heard).
+Use null for anything not stated. NEVER guess a dose or frequency. Confidence
+must be “low” when the name itself is uncertain.
 
 E. SUGGESTED REPORTS / INVESTIGATIONS
 Whenever a test, scan, lab report, or investigation is mentioned, requested or discussed (e.g. CBC, HbA1c, lipid profile, thyroid profile, X-ray, ultrasound, MRI, ECG, urine routine, biopsy), add it to summary.suggestedReports with the reason stated in the conversation and an urgency of routine | soon | urgent | unknown. Do not add tests that were not mentioned.
@@ -92,7 +99,10 @@ G. SAFETY AND HONESTY RULES
 - Do not diagnose, prescribe, or add clinical advice that is not in the transcript.
 - Do not invent patient details (name, age, gender) — leave them out.
 - Prefer under-reporting to hallucinating. Mark uncertainty explicitly.
-- Never translate a drug name into a literal English word (e.g. never output "AC lock"); always resolve it to a medicine or flag it.
+- Never “correct” a medicine name you are not certain about — keep it as heard
+  and flag it instead.
+- Never translate a drug name into a literal English word (e.g. never output
+  “AC lock”); keep it as heard and flag it.
 - If the conversation is not medical, still translate it and return a plain-language summary with empty medical sections.
 
 H. OUTPUT
@@ -299,11 +309,11 @@ export async function analyzeMedicalTranscript(
           maxOutputTokens: 16384,
           responseMimeType: "application/json",
           responseSchema: RESPONSE_SCHEMA,
-          // 2.5 Flash thinks by default, which can eat the JSON budget. 2.5 Pro
-          // cannot disable thinking (minimum budget is 128), so leave it alone.
-          ...(/2\.5/.test(config.gemini.model) && !/pro/i.test(config.gemini.model)
-            ? { thinkingConfig: { thinkingBudget: 0 } }
-            : {}),
+          // gemini-2.5 models think by default, which can eat the JSON budget.
+          // gemini-2.5 Pro cannot disable thinking (minimum budget is 128), so leave it alone.
+          // ...(/2\.5/.test(config.gemini.model) && !/pro/i.test(config.gemini.model)
+          //   ? { thinkingConfig: { thinkingBudget: 0 } }
+          //   : {}),
         },
       }),
       signal: AbortSignal.timeout(120_000),
