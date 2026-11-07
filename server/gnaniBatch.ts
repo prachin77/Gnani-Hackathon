@@ -35,11 +35,13 @@ interface JobFile {
   job_id: string;
   original_path: string;
   language_code: string;
-  duration_seconds: number;
+  duration_seconds: number | string | null;
   model: string;
   mode: string;
   transcript_url: string | null;
   status: string;
+  error_message?: string | null;
+  error_code?: string | null;
 }
 
 interface TranscriptDocument {
@@ -298,6 +300,33 @@ export async function getDiarizeJobFiles(jobId: string): Promise<JobFile[]> {
 
   const body = (await res.json()) as { data: JobFile[] };
   return body.data ?? [];
+}
+
+/**
+ * Get failed/skipped file results for a job, including `error_message`.
+ * Gnani exposes per-file failure reasons only through `/files`.
+ */
+export async function getDiarizeJobFailures(jobId: string): Promise<JobFile[]> {
+  const res = await gnaniFetch(
+    `${GNANI_BASE}/stt/v3/batch/jobs/${encodeURIComponent(jobId)}/files`,
+    {
+      method: "GET",
+      headers: batchHeaders(),
+    },
+  );
+
+  if (!res.ok) {
+    let detail = "";
+    try {
+      detail = await res.text();
+    } catch {
+      // ignore
+    }
+    throw new Error(`Gnani batch files failed (${res.status}): ${detail}`);
+  }
+
+  const body = (await res.json()) as { data: JobFile[] };
+  return (body.data ?? []).filter((file) => file.status !== "COMPLETED");
 }
 
 /**

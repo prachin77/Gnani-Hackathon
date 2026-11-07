@@ -295,7 +295,7 @@ Useful for verifying the shared plumbing (resampler, framing, pacing, flow contr
 | `504` "Could not reach the transcription service" | Your server couldn't reach `api.vachana.ai` — check internet/proxy/firewall. |
 | 422 "invalid character … `download`" | Should not occur (routes ordered correctly); means an old build is cached — rebuild (`npm run build`). |
 | "This file is larger than 10 MB" | Batch direct upload is capped at 10 MB. Compress to MP3/OGG, trim, or split the recording. |
-| Batch ends with `FAILED` / `START_FAILED` | Check the server log for the Gnani error body (`cancel_reason` is included in the UI). Silent audio fails with "Empty transcript after 3 retries". |
+| Batch ends with `FAILED` / `START_FAILED` | You now see Gnani's per-file reason in the UI (e.g. `Empty transcript after 3 retries`), and it is logged as `Gnani batch job files failed` on the server. Silent/tone-only audio fails this way; re-record with audible speech. |
 | Batch finishes with "No speech detected" | Processed fully but no utterances found — verify the file contains audible speech. |
 | "Too many active recording sessions" | Realtime per-IP cap (`MAX_SESSIONS_PER_IP`, default 2). Stop another tab or wait a few seconds. |
 | No transcript while speaking live | VAD emits per finished utterance: speak ≥ ~0.5 s then pause. Raise mic input level. |

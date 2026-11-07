@@ -9,6 +9,7 @@ import {
   cancelDiarizeJob,
   createDiarizeJob,
   downloadDiarizeTranscript,
+  getDiarizeJobFailures,
   getDiarizeJobFiles,
   getDiarizeJobStatus,
   normalizeAudioFilename,
@@ -120,6 +121,14 @@ app.get("/api/stt/batch/diarize/download", async (req, res) => {
 app.get("/api/stt/batch/diarize/:jobId", async (req, res) => {
   try {
     const status = await getDiarizeJobStatus(req.params.jobId);
+    if (
+      status.status === "FAILED" ||
+      status.status === "START_FAILED" ||
+      status.status === "PARTIAL_FAILURE" ||
+      status.status === "CANCELLED"
+    ) {
+      logger.warn("Gnani batch job reached a failing state", status);
+    }
     res.json(status);
   } catch (error) {
     logger.error("Gnani batch diarize status failed", {
@@ -136,6 +145,30 @@ app.get("/api/stt/batch/diarize/:jobId/files", async (req, res) => {
     res.json({ data: files });
   } catch (error) {
     logger.error("Gnani batch diarize files failed", {
+      jobId: req.params.jobId,
+      error: (error as Error).message,
+    });
+    res.status(502).json({ error: (error as Error).message });
+  }
+});
+
+// Per-file failure reasons (FAILED / SKIPPED / CANCELLED).
+app.get("/api/stt/batch/diarize/:jobId/failures", async (req, res) => {
+  try {
+    const files = await getDiarizeJobFailures(req.params.jobId);
+    if (files.length > 0) {
+      logger.warn("Gnani batch job files failed", {
+        jobId: req.params.jobId,
+        files: files.map((file) => ({
+          status: file.status,
+          error_code: file.error_code ?? null,
+          error_message: file.error_message ?? null,
+        })),
+      });
+    }
+    res.json({ data: files });
+  } catch (error) {
+    logger.error("Gnani batch diarize failures failed", {
       jobId: req.params.jobId,
       error: (error as Error).message,
     });

@@ -167,8 +167,42 @@ export function useBatchDiarization() {
       job_id: string;
       status: string;
       progress?: { completed_files: number; total_files: number };
+      cancel_reason?: string;
     };
   }, []);
+
+  const fetchFailures = useCallback(async (jobId: string) => {
+    const res = await fetch(
+      `/api/stt/batch/diarize/${encodeURIComponent(jobId)}/failures`,
+    );
+    if (!res.ok) return [];
+    const body = (await res.json()) as {
+      data: Array<{ status: string; error_message?: string | null; error_code?: string | null }>;
+    };
+    return body.data ?? [];
+  }, []);
+
+  /** Turns Gnani's per-file failure data into a human-readable reason. */
+  const failureReason = useCallback(
+    async (jobId: string): Promise<string> => {
+      try {
+        const failures = await fetchFailures(jobId);
+        const withMessage = failures.find((file) => file.error_message);
+        if (withMessage?.error_message) {
+          return withMessage.error_code
+            ? `${withMessage.error_message} (${withMessage.error_code})`
+            : withMessage.error_message;
+        }
+        if (failures.length > 0) {
+          return `${failures.length} file(s) could not be processed (${failures[0].status}).`;
+        }
+      } catch {
+        // The reason is a bonus; never mask the original failure with this.
+      }
+      return "";
+    },
+    [fetchFailures],
+  );
 
   const fetchFiles = useCallback(async (jobId: string) => {
     const res = await fetch(
@@ -238,7 +272,15 @@ export function useBatchDiarization() {
                 const completed = files.data.filter((f) => f.transcript_url);
 
                 if (completed.length === 0) {
-                  fail("No transcripts were produced. Try another file.");
+                  const reason =
+                    status.status === "PARTIAL_FAILURE"
+                      ? await failureReason(job.job_id)
+                      : "";
+                  fail(
+                    reason
+                      ? `Diarization failed. ${reason}`
+                      : "No transcripts were produced. Try another file.",
+                  );
                   return;
                 }
 
@@ -287,12 +329,22 @@ export function useBatchDiarization() {
               return;
             }
 
-            if (status.status === "FAILED" || status.status === "CANCELLED") {
+            if (
+              status.status === "FAILED" ||
+              status.status === "START_FAILED" ||
+              status.status === "CANCELLED"
+            ) {
               stopPolling();
+              if (status.status === "CANCELLED") {
+                fail(
+                  `Diarization job cancelled.${status.cancel_reason ? ` ${status.cancel_reason}` : ""}`.trim(),
+                );
+                return;
+              }
+              const reason = await failureReason(job.job_id);
+              const cancelReason = (status as any).cancel_reason;
               fail(
-                `Diarization job ${status.status.toLowerCase()}. ${
-                  (status as any).cancel_reason || ""
-                }`.trim(),
+                `Diarization job failed.${reason ? ` ${reason}` : cancelReason ? ` ${cancelReason}` : ""}`,
               );
               return;
             }
@@ -309,7 +361,7 @@ export function useBatchDiarization() {
         setState("error");
       }
     },
-    [createJob, startJob, pollStatus, fetchFiles, downloadTranscript, select, fail, stopPolling],
+    [createJob, startJob, pollStatus, fetchFiles, downloadTranscript, failureReason, select, fail, stopPolling],
   );
 
   /** Starts the diarization flow on the previously selected file. */
