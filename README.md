@@ -63,7 +63,7 @@ Open **http://localhost:8787** — Express serves the built frontend and hosts b
 
 #### What happens on Stop (automatic)
 
-1. The whole live session recording is uploaded to the server and turned into a Gnani **Batch STT job** with `with_diarization: true` — no extra click, no second upload.
+1. The whole live session recording is uploaded to the server and turned into a Gnani **Batch STT job** (Prisma v3.0) — no extra click, no second upload.
 2. The panel shows the usual diarization stages (*Uploading → Starting job → Diarizing → Fetching transcripts → Complete*).
 3. When it finishes you get **two transcripts side by side**:
    - **Diarized transcript (speakers)** — green `Speaker N` badges and `start – end` timestamps. **This is the canonical text** to send to translation/summary.
@@ -75,7 +75,7 @@ Open **http://localhost:8787** — Express serves the built frontend and hosts b
 ### 2. Batch upload with speaker diarization
 
 1. Click **Upload Audio** and choose a file → the app validates it and shows a **ready state**. Nothing is sent yet in this confirmed two-step flow.
-2. Click **Generate Transcript** → the file uploads to *your* server, which creates a Gnani **Batch STT job** with `with_diarization: true`.
+2. Click **Generate Transcript** → the file uploads to *your* server, which creates a Gnani **Batch STT job** (Prisma v3.0).
 3. The panel tracks every stage — *Ready → Uploading → Starting job → Diarizing → Fetching transcripts → Complete* — with a progress bar. Status is polled every 10 s automatically.
 4. When done, segments appear with green **Speaker N** badges and `start – end` timestamps. Cancel stops local polling **and** asks Gnani to cancel the running job (best effort).
 
@@ -109,7 +109,9 @@ live: MediaRecorder (Opus 32k)   (uploaded file path is identical;
 POST /api/stt/batch/diarize ──►  multipart forward ────────────►   POST /stt/v3/batch/jobs
    (original file bytes)             config: model prisma-v3.0     → 201 { job_id, CREATED }
                                      format transcribe
-                                     with_diarization true
+                                     with_diarization false (labels still
+                                       produced by prisma-v3.0; prevents a
+                                       diarization failure failing the file)
 POST /:id/start ─────────────►  ─────────────────────────────►   POST /stt/v3/batch/jobs/:id/start
 GET  /:id (every 10 s) ──────►  ───── polling ────────────────►  GET /stt/v3/batch/jobs/:id
 GET  /:id/files ─────────────►  ─────────────────────────────►  GET .../files?status=COMPLETED
@@ -151,7 +153,7 @@ x-max-speech-s:     30    ← forces a transcript mid-monologue so results keep 
 | Max file size | **10 MB** (Gnani's direct-upload limit) |
 | Accepted extensions (browser picker) | `audio/*`, `.wav`, `.mp3`, `.m4a`, `.aac`, `.ogg`, `.oga`, `.opus`, `.flac`, `.webm`, `.mpeg`, `.mpga`, `.mp4` |
 | Accepted by Gnani | `.aac .amr .flac .m4a .mp3 .mp4 .ogg .opus .wav .webm` — mismatched extensions are auto-corrected via magic-byte sniffing |
-| Max speakers | Up to `num_speakers: 5` (Prisma v3.0 produces labels regardless; the flag only decides whether a diarization failure fails the file) |
+| Max speakers | Up to `num_speakers: 5` (Prisma v3.0 produces labels regardless; `with_diarization` is kept **false** so a diarization hiccup cannot fail the whole file) |
 | Max audio duration | 4 h per file (Gnani), but 10 MB usually binds first — use MP3/OGG for long recordings |
 | Poll interval | 10 s; job polling gives up after ~30 minutes |
 | `transcript_url` expiry | 1 h — refunded automatically by re-fetching files |

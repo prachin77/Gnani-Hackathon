@@ -155,7 +155,9 @@ export function buildDiarizeJobForm(
     language_code: languageCode,
     format: "transcribe",
     mode: "transcribe",
-    with_diarization: true,
+    // Prisma v3.0 attaches speaker_id to segments even when this is false, so
+    // keep it off: with `true`, a diarization failure fails the whole file.
+    with_diarization: false,
     num_speakers: numSpeakers,
   });
 
